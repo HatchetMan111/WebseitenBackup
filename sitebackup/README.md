@@ -1,9 +1,17 @@
 # SiteBackup – komplette Webseite als HTML-Dateien sichern
 
-Lokale Backup-App für Proxmox LXC: Ein Job = eine Start-URL. Der Crawler folgt
-allen Unterseiten (gleiche Domain), speichert **jede Seite als `.html`-Datei**
-und bietet alles als **ZIP-Download**. Zeitplan pro Job:
-**manuell · stündlich · täglich · wöchentlich · monatlich · Cron**.
+Lokale Backup-App für Proxmox LXC: Ein Job = eine Start-URL. Ablauf in
+2 Phasen (wie web-check erst analysieren, dann sichern):
+
+1. **Discovery:** alle Unterseiten herausfinden – via `robots.txt`
+   (Sitemap-Zeilen) + `sitemap.xml` (inkl. Sitemap-Index) + Link-Crawl.
+   Ergebnis: indexierte Liste (Nr, Seitenname/Titel, URL, Quelle).
+2. **Backup:** Unterseite für Unterseite als **`.html`-Datei** sichern, mit
+   Titel-Index (`mapping.json`) und Inhaltsverzeichnis (`index.html`).
+   Download **komplett als ZIP** oder **jede Seite einzeln**.
+
+Zeitplan pro Job: **manuell · stündlich · täglich · wöchentlich · monatlich · Cron**
+(plant.seconds automatisch Discovery + Backup ein).
 
 ## Einzeiler (Proxmox-Host)
 
@@ -26,14 +34,15 @@ ausgegeben. Trace-Re-run: `bash -x install/sitebackup.sh`.
 - Web UI: `http://[LXC-IP]:8090`
 - Health: `http://[LXC-IP]:8090/api/health`
 - Service: `systemctl status sitebackup` · Logs: `journalctl -u sitebackup -f`
-- Daten: `/opt/sitebackup/data/jobs/<job-id>/pages/*.html` + `mapping.json` + `job-<id>-backup.zip`
+- Daten: `/opt/sitebackup/data/jobs/<job-id>/pages/*.html` + `discovery.json` + `mapping.json` + `index.html` + `job-<id>-backup.zip`
 - Container-Shell: `pct enter <CTID>`
 
 ## Bedienung
 
 1. Job anlegen: Name + Start-URL (z. B. `https://example.com`), max. Seiten (Default 100), Tiefe (Default 3).
-2. Zeitplan wählen: z. B. wöchentlich Montag 03:00, monatlich am 1. um 02:00, oder Cron wie `0 3 * * 1`.
-3. „Jetzt sichern“ für Sofort-Backup, danach Einzelseiten als HTML oder alles als ZIP laden.
+2. **Schritt 1 „Seiten entdecken“:** listet alle Unterseiten indexiert mit Seitennamen (Quelle: Sitemap/Link).
+3. **Schritt 2 „Backup starten“:** sichert jede Seite einzeln als HTML (Live-Fortschritt `[i/n]` im Log).
+4. Laden: **komplett als ZIP** (inkl. Index) oder **jede Unterseite einzeln** als HTML; Zeitplan für Automatik wählen (z. B. wöchentlich Montag 03:00 oder Cron `0 3 * * 1`).
 
 ## API (Auszug)
 
@@ -42,11 +51,15 @@ ausgegeben. Trace-Re-run: `bash -x install/sitebackup.sh`.
 | `GET` | `/api/health` | Healthcheck |
 | `GET/POST` | `/api/jobs` | Jobs listen / anlegen |
 | `PUT/DELETE` | `/api/jobs/{id}` | Job ändern / löschen |
-| `POST` | `/api/jobs/{id}/run` | Sofort-Backup starten |
+| `POST` | `/api/jobs/{id}/discover` | Phase 1: Unterseiten entdecken (indexierte Liste) |
+| `GET` | `/api/jobs/{id}/discover` | Gespeicherte Discovery-Liste |
+| `POST` | `/api/jobs/{id}/run` | Phase 2: Sofort-Backup Seite für Seite |
 | `GET` | `/api/runs?job_id=` | Läufe + Status |
-| `GET` | `/api/jobs/{id}/pages` | Gesicherte URLs + Dateien |
+| `GET` | `/api/runs/{id}` | Run inkl. Live-Log (`[i/n]`-Fortschritt) |
+| `GET` | `/api/jobs/{id}/pages` | Index: Nr, Seitenname, URL, HTML-Datei |
+| `GET` | `/api/jobs/{id}/index` | Inhaltsverzeichnis als HTML |
 | `GET` | `/api/jobs/{id}/page?file=` | Einzelne HTML-Datei |
-| `GET` | `/api/jobs/{id}/download` | Alles als ZIP |
+| `GET` | `/api/jobs/{id}/download` | Alles als ZIP (HTML + Index + Mapping) |
 
 ## Update
 

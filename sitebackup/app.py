@@ -1,19 +1,26 @@
 """SiteBackup – komplette Webseiten lokal als HTML-Dateien sichern.
 
-- Ein Job = eine Start-URL. Crawler folgt Unterseiten (same-domain).
-- Jede Unterseite wird als .html-Datei unter data/jobs/<id>/ gespeichert.
-- Download einzeln oder als ZIP. Zeitplan: manuell/stuendlich/taeglich/
-  woechentlich/monatlich/cron (APScheduler, reboot-sicher via DB + Scheduler).
+Ablauf pro Job (2 Phasen, wie web-check erst analysieren, dann sichern):
+1. DISCOVERY: alle Unterseiten herausfinden – via robots.txt (Sitemap-Zeilen)
+   + sitemap.xml (inkl. Sitemap-Index) + BFS-Link-Crawl. Ergebnis ist eine
+   indexierte Liste (Nr, Seitenname/Titel, URL, Quelle) in discovery.json.
+2. BACKUP: Unterseite fuer Unterseite als .html-Datei unter
+   data/jobs/<id>/pages/ sichern, mit Titel-Index (mapping.json) und
+   Inhaltsverzeichnis (index.html). Download komplett als ZIP oder einzeln.
+- Zeitplan: manuell/stuendlich/taeglich/woechentlich/monatlich/cron
+  (APScheduler, reboot-sicher via DB + Scheduler).
 - Web UI: statische Datei static/index.html, keine Build-Tools noetig.
 """
 from __future__ import annotations
 
 import hashlib
+import html as htmlmod
 import json
 import os
 import re
 import threading
 import traceback
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import deque
 from datetime import datetime
@@ -81,7 +88,7 @@ class Run(Base):
 
 Base.metadata.create_all(engine)
 
-app = FastAPI(title="SiteBackup", version="1.0.0")
+app = FastAPI(title="SiteBackup", version="1.1.0")
 
 # ---------------------------------------------------------------- Modelle
 
@@ -214,72 +221,324 @@ def extract_links(html: str, base: str) -> list[str]:
     return uniq
 
 
-def crawl_job(job_id: int, start_url: str, max_pages: int, max_depth: int, same_domain: bool) -> dict:
-    """BFS-Crawl, jede Seite als HTML-Datei. Gibt Statistik + Mapping zurueck."""
+def extract_title(html: str, url: str) -> str:
+    """Seitenname aus <title>; Fallback: sprechender Name aus URL-Pfad."""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        if soup.title and soup.title.get_text(strip=True):
+            return soup.title.get_text(strip=True)[:200]
+        h1 = soup.find("h1")
+        if h1 and h1.get_text(strip=True):
+            return h1.get_text(strip=True)[:200]
+    except Exception:
+        pass
+    p = urlparse(url)
+    seg = (p.path.strip("/") or "Startseite").split("/")[-1]
+    seg = re.sub(r"\.(html?|php|aspx?)$", "", seg)
+    name = seg.replace("-", " ").replace("_", " ").strip().title() or "Startseite"
+    return name[:200]
+
+
+def page_name_for(url: str, title: str) -> str:
+    """Index-Name: Titel bevorzugen, sonst URL-Pfad."""
+    return title or extract_title("", url)
+
+
+def fetch_robots_sitemaps(client: httpx.Client, start_url: str) -> tuple[list[str], list[str]]:
+    """robots.txt lesen (wie web-check 'Crawl Rules'): Sitemap-Zeilen + Disallows.
+
+    Gibt (sitemap_urls, disallows) zurueck. Fehler -> leere Listen (tolerant).
+    """
+    p = urlparse(start_url)
+    robots_url = f"{p.scheme}://{p.netloc}/robots.txt"
+    sitemaps: list[str] = []
+    disallows: list[str] = []
+    try:
+        resp = client.get(robots_url)
+        if resp.status_code != 200:
+            return [], []
+        for line in resp.text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if re.match(r"(?i)^sitemap\s*:", line):
+                sm = line.split(":", 1)[1].strip()
+                if sm.startswith("http"):
+                    sitemaps.append(sm)
+            elif re.match(r"(?i)^disallow\s*:", line):
+                dis = line.split(":", 1)[1].strip()
+                if dis:
+                    disallows.append(dis)
+    except Exception:
+        pass
+    return sitemaps, disallows
+
+
+def parse_sitemap_urls(client: httpx.Client, sitemap_url: str, start_url: str,
+                       same_domain: bool, _seen_idx: set[str] | None = None) -> list[str]:
+    """sitemap.xml bzw. Sitemap-Index rekursiv parsen (wie web-check 'Listed Pages').
+
+    Sammelt <loc>-URLs aus urlset + folgt <sitemap>-Einträgen aus sitemapindex.
+    """
+    if _seen_idx is None:
+        _seen_idx = set()
+    if sitemap_url in _seen_idx:
+        return []
+    _seen_idx.add(sitemap_url)
+    found: list[str] = []
+    try:
+        resp = client.get(sitemap_url)
+        if resp.status_code != 200:
+            return []
+        root = ET.fromstring(resp.content)
+    except Exception:
+        return []
+
+    # Sitemap-Index: enthaltene Sitemaps rekursiv folgen
+    for el in root.iter():
+        if el.tag.endswith("sitemap"):
+            for loc in el.iter():
+                if loc.tag.endswith("loc") and (loc.text or "").strip():
+                    found += parse_sitemap_urls(client, loc.text.strip(), start_url, same_domain, _seen_idx)
+    # URL-Set: Seiten-URLs sammeln (same-site-Filter)
+    for el in root.iter():
+        if el.tag.endswith("url"):
+            for loc in el.iter():
+                if loc.tag.endswith("loc") and (loc.text or "").strip():
+                    u, _ = urldefrag(loc.text.strip())
+                    pu = urlparse(u)
+                    if pu.scheme not in ("http", "https"):
+                        continue
+                    if same_domain and not same_site(start_url, u):
+                        continue
+                    if u not in found:
+                        found.append(u)
+    return found
+
+
+def discover_site(job_id: int, start_url: str, max_pages: int, max_depth: int,
+                  same_domain: bool) -> dict:
+    """PHASE 1 – alle Unterseiten herausfinden (nicht speichern, nur indexieren).
+
+    Quellen in Reihenfolge: Start-URL -> robots.txt/Sitemap -> BFS-Link-Crawl.
+    Schreibt data/jobs/<id>/discovery.json + discovery.log und gibt die
+    indexierte Liste [{nr, url, title, depth, source}] zurueck.
+    """
+    dest = job_dir(job_id)
+    log_lines: list[str] = []
+    ordered: list[dict] = []
+    seen: set[str] = set()
+
+    def add(url: str, depth: int, source: str, title: str = ""):
+        canon, _ = urldefrag(url)
+        if canon in seen or len(ordered) >= max_pages:
+            return False
+        seen.add(canon)
+        ordered.append({"nr": len(ordered) + 1, "url": canon,
+                        "title": title, "depth": depth, "source": source})
+        return True
+
+    headers = {"User-Agent": "SiteBackup/1.1 (+local discovery; polite 0.2s delay)"}
+    with httpx.Client(headers=headers, timeout=20, follow_redirects=True, max_redirects=5) as client:
+        add(start_url, 0, "start")
+        log_lines.append(f"Start: {start_url}")
+        # robots.txt + Sitemap (web-check: Crawl Rules + Listed Pages)
+        sm_urls, disallows = fetch_robots_sitemaps(client, start_url)
+        if disallows:
+            log_lines.append(f"robots.txt: {len(disallows)} Disallow-Regeln (reine Info, Backup ignoriert sie)")
+        if not sm_urls:
+            p = urlparse(start_url)
+            sm_urls = [f"{p.scheme}://{p.netloc}/sitemap.xml"]
+        sm_found: list[str] = []
+        for sm in sm_urls:
+            urls = parse_sitemap_urls(client, sm, start_url, same_domain)
+            if urls:
+                log_lines.append(f"Sitemap {sm}: {len(urls)} URLs")
+            for u in urls:
+                if len(ordered) >= max_pages:
+                    break
+                if add(u, 0, "sitemap"):
+                    sm_found.append(u)
+        # BFS-Link-Crawl fuer alles, was nicht in der Sitemap steht
+        queue: deque[tuple[str, int]] = deque([(start_url, 0)])
+        visited_fetch: set[str] = set()
+        while queue and len(ordered) < max_pages:
+            url, depth = queue.popleft()
+            canon, _ = urldefrag(url)
+            if canon in visited_fetch:
+                continue
+            visited_fetch.add(canon)
+            try:
+                resp = client.get(canon)
+                resp.raise_for_status()
+                ctype = resp.headers.get("content-type", "")
+                if "html" not in ctype.lower():
+                    continue
+                html = resp.text
+                title = extract_title(html, canon)
+                for e in ordered:
+                    if e["url"] == canon and not e["title"]:
+                        e["title"] = title
+                if depth < max_depth:
+                    for link in extract_links(html, canon):
+                        lcanon, _ = urldefrag(link)
+                        if lcanon in seen:
+                            continue
+                        if same_domain and not same_site(start_url, lcanon):
+                            continue
+                        if add(lcanon, depth + 1, "link"):
+                            queue.append((lcanon, depth + 1))
+                        if len(ordered) >= max_pages:
+                            break
+            except Exception as exc:
+                log_lines.append(f"Discovery-Fehler {canon}: {type(exc).__name__}: {exc}")
+                continue
+        # Titel nachladen fuer Sitemap-URLs, die der BFS-Lauf nicht besucht hat
+        for e in ordered:
+            if not e["title"] and len(visited_fetch) < max_pages:
+                try:
+                    resp = client.get(e["url"])
+                    if resp.status_code == 200 and "html" in resp.headers.get("content-type", ""):
+                        e["title"] = extract_title(resp.text, e["url"])
+                        visited_fetch.add(e["url"])
+                except Exception:
+                    pass
+            if not e["title"]:
+                e["title"] = extract_title("", e["url"])
+
+    n_sm = sum(1 for e in ordered if e["source"] == "sitemap")
+    n_link = sum(1 for e in ordered if e["source"] == "link")
+    log_lines.append(f"Discovery fertig: {len(ordered)} Seiten ({n_sm} aus Sitemap, {n_link} via Links, Rest Start)")
+    payload = {"start_url": start_url, "count": len(ordered),
+               "discovered_at": datetime.utcnow().isoformat(), "pages": ordered}
+    (dest / "discovery.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    (dest / "discovery.log").write_text("\n".join(log_lines), encoding="utf-8")
+    return payload
+
+
+def load_discovery(job_id: int) -> dict | None:
+    f = job_dir(job_id) / "discovery.json"
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+def crawl_job(job_id: int, start_url: str, max_pages: int, max_depth: int, same_domain: bool,
+              progress=None) -> dict:
+    """PHASE 2 – Unterseite fuer Unterseite als HTML-Datei sichern.
+
+    Nutzt die Discovery-Liste (discovery.json), erstellt sie bei Bedarf neu.
+    `progress(done, total, line)` wird nach jeder Seite aufgerufen (Live-Status).
+    Mapping-Eintrag pro URL: {nr, title, page_name, file, status, bytes}.
+    Schreibt mapping.json + last.log + index.html (Inhaltsverzeichnis).
+    """
     dest = job_dir(job_id)
     pages_dir = dest / "pages"
-    visited: set[str] = set()
-    queue: deque[tuple[str, int]] = deque([(start_url, 0)])
+    disc = load_discovery(job_id)
+    if not disc or disc.get("start_url") != start_url or not disc.get("pages"):
+        disc = discover_site(job_id, start_url, max_pages, max_depth, same_domain)
+    targets = [p for p in disc["pages"]][:max_pages]
+    total = len(targets)
     mapping: dict[str, dict] = {}
     log_lines: list[str] = []
     ok = failed = total_bytes = 0
 
-    headers = {"User-Agent": "SiteBackup/1.0 (+local backup; polite 0.2s delay)"}
+    headers = {"User-Agent": "SiteBackup/1.1 (+local backup; polite 0.2s delay)"}
     with httpx.Client(headers=headers, timeout=20, follow_redirects=True, max_redirects=5) as client:
-        while queue and len(visited) < max_pages:
-            url, depth = queue.popleft()
-            canonical, _ = urldefrag(url)
-            if canonical in visited:
-                continue
-            visited.add(canonical)
+        for i, entry in enumerate(targets, start=1):
+            canon = entry["url"]
+            title = entry.get("title") or extract_title("", canon)
             try:
-                resp = client.get(canonical)
+                resp = client.get(canon)
                 resp.raise_for_status()
                 ctype = resp.headers.get("content-type", "")
                 if "html" not in ctype.lower() and not resp.text.lstrip().lower().startswith(("<!doctype", "<html")):
-                    log_lines.append(f"SKIP (kein HTML, {ctype}): {canonical}")
-                    mapping[canonical] = {"file": None, "status": resp.status_code, "note": f"kein HTML ({ctype})"}
+                    line = f"[{i}/{total}] SKIP (kein HTML, {ctype}): {title} <{canon}>"
+                    log_lines.append(line)
+                    mapping[canon] = {"nr": i, "title": title, "page_name": title,
+                                      "file": None, "status": resp.status_code,
+                                      "note": f"kein HTML ({ctype})"}
                     failed += 1
+                    if progress:
+                        progress(i, total, line)
                     continue
                 html = resp.text
                 if len(html.encode("utf-8")) > 8 * 1024 * 1024:
-                    log_lines.append(f"SKIP (>8MB): {canonical}")
-                    mapping[canonical] = {"file": None, "status": resp.status_code, "note": "zu gross"}
+                    line = f"[{i}/{total}] SKIP (>8MB): {title} <{canon}>"
+                    log_lines.append(line)
+                    mapping[canon] = {"nr": i, "title": title, "page_name": title,
+                                      "file": None, "status": resp.status_code, "note": "zu gross"}
                     failed += 1
+                    if progress:
+                        progress(i, total, line)
                     continue
-                fname = url_to_filename(canonical)
+                title = extract_title(html, canon) or title
+                fname = url_to_filename(canon)
                 fpath = pages_dir / fname
                 fpath.parent.mkdir(parents=True, exist_ok=True)
                 fpath.write_text(html, encoding="utf-8")
                 size = fpath.stat().st_size
                 total_bytes += size
                 ok += 1
-                log_lines.append(f"OK [{resp.status_code}] Tiefe {depth}: {canonical} -> {fname} ({size} B)")
-                mapping[canonical] = {"file": fname, "status": resp.status_code, "bytes": size}
-                if depth < max_depth:
-                    for link in extract_links(html, canonical):
-                        lcanon, _ = urldefrag(link)
-                        if lcanon in visited:
-                            continue
-                        if same_domain and not same_site(start_url, lcanon):
-                            continue
-                        if len(visited) + len(queue) >= max_pages * 2:
-                            break
-                        queue.append((lcanon, depth + 1))
+                line = f"[{i}/{total}] OK [{resp.status_code}] {title} <{canon}> -> {fname} ({size} B)"
+                log_lines.append(line)
+                mapping[canon] = {"nr": i, "title": title, "page_name": title,
+                                  "file": fname, "status": resp.status_code, "bytes": size}
             except Exception as exc:  # komplette Kette ins Log, nicht nur letzte Zeile
                 tb = traceback.format_exc(limit=3).strip().splitlines()
                 short = f"{type(exc).__name__}: {exc}"
-                log_lines.append(f"FEHLER: {canonical} -> {short}")
-                mapping[canonical] = {"file": None, "status": 0, "note": short, "trace": tb[-3:]}
+                line = f"[{i}/{total}] FEHLER {title} <{canon}> -> {short}"
+                log_lines.append(line)
+                mapping[canon] = {"nr": i, "title": title, "page_name": title,
+                                  "file": None, "status": 0, "note": short, "trace": tb[-3:]}
                 failed += 1
+            if progress:
+                progress(i, total, log_lines[-1])
 
     (dest / "mapping.json").write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
     (dest / "last.log").write_text("\n".join(log_lines), encoding="utf-8")
-    return {"ok": ok, "failed": failed, "bytes": total_bytes, "log": "\n".join(log_lines)}
+    write_index_html(job_id, disc.get("start_url", start_url), mapping)
+    return {"ok": ok, "failed": failed, "bytes": total_bytes, "pages": total,
+            "log": "\n".join(log_lines)}
+
+
+def write_index_html(job_id: int, start_url: str, mapping: dict[str, dict]) -> Path:
+    """Inhaltsverzeichnis: Nr, Seitenname/Titel, URL, Datei, Groesse."""
+    rows = sorted(mapping.items(), key=lambda kv: (kv[1].get("nr") or 999999))
+    trs = []
+    for url, m in rows:
+        nr = m.get("nr", "?")
+        title = htmlmod.escape(str(m.get("title") or url))
+        file = m.get("file")
+        if file:
+            dl = f'<a href="pages/{htmlmod.escape(file)}">{htmlmod.escape(file)}</a>'
+        else:
+            dl = f'<span class="miss">– ({htmlmod.escape(str(m.get("note", "Fehler"))[:80])})</span>'
+        size = f'{m.get("bytes", 0) / 1024:.1f} KB' if m.get("bytes") else "–"
+        trs.append(f"<tr><td>{nr}</td><td><b>{title}</b></td>"
+                   f'<td><a href="{htmlmod.escape(url)}">{htmlmod.escape(url)}</a></td>'
+                   f"<td>{dl}</td><td>{size}</td></tr>")
+    doc = f"""<!DOCTYPE html>
+<html lang="de"><head><meta charset="UTF-8"><title>SiteBackup-Index – {htmlmod.escape(start_url)}</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:1000px;margin:24px auto;padding:0 16px;color:#111}}
+table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:6px 8px;text-align:left;font-size:14px}}
+th{{background:#f0f0f0}}.miss{{color:#a00}}</style></head><body>
+<h1>Backup-Index: {htmlmod.escape(start_url)}</h1>
+<p>{len(rows)} Unterseiten, gesichert am {htmlmod.escape(datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC"))}</p>
+<table><tr><th>Nr</th><th>Seitenname</th><th>URL</th><th>HTML-Datei</th><th>Groesse</th></tr>
+{''.join(trs)}</table></body></html>"""
+    idx = job_dir(job_id) / "index.html"
+    idx.write_text(doc, encoding="utf-8")
+    return idx
 
 
 def run_job_sync(job_id: int) -> int:
-    """Einen Job jetzt ausfuehren (synchron). Gibt run_id zurueck."""
+    """Einen Job jetzt ausfuehren (synchron). Gibt run_id zurueck.
+
+    Schreibt den Fortschritt nach jeder Unterseite in die DB (Live-Polling),
+    erstellt am Ende ZIP + Index.
+    """
     with Session(engine) as db:
         job = db.get(Job, job_id)
         if not job:
@@ -293,7 +552,18 @@ def run_job_sync(job_id: int) -> int:
     error, log, ok, failed, total = "", "", 0, 0, 0
     status = "ok"
     try:
-        res = crawl_job(job_id, start_url, max_pages, max_depth, same_domain)
+        acc: list[str] = []
+
+        def progress(done: int, total_pages: int, line: str):
+            acc.append(line)
+            with Session(engine) as db:
+                r = db.get(Run, run_id)
+                r.log = "\n".join(acc)[-20000:]
+                r.pages_ok = sum(1 for ln in acc if ln.split("] ", 1)[-1].startswith("OK"))
+                r.pages_failed = sum(1 for ln in acc if "SKIP" in ln or "FEHLER" in ln)
+                db.commit()
+
+        res = crawl_job(job_id, start_url, max_pages, max_depth, same_domain, progress=progress)
         ok, failed, total, log = res["ok"], res["failed"], res["bytes"], res["log"]
     except Exception as exc:
         status = "error"
@@ -323,8 +593,9 @@ def make_zip(job_id: int) -> Path:
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in sorted((dest / "pages").rglob("*.html")):
             zf.write(f, f.relative_to(dest))
-        if (dest / "mapping.json").exists():
-            zf.write(dest / "mapping.json", "mapping.json")
+        for extra in ("mapping.json", "discovery.json", "index.html"):
+            if (dest / extra).exists():
+                zf.write(dest / extra, extra)
     return zpath
 
 
@@ -460,6 +731,33 @@ def delete_job(job_id: int):
     return {"deleted": job_id}
 
 
+@app.post("/api/jobs/{job_id}/discover")
+def trigger_discover(job_id: int):
+    """PHASE 1: alle Unterseiten herausfinden (robots.txt + Sitemap + Links).
+
+    Gibt die indexierte Liste zurueck: [{nr, url, title, depth, source}].
+    """
+    with Session(engine) as db:
+        job = db.get(Job, job_id)
+        if not job:
+            raise HTTPException(404, "Job nicht gefunden")
+        start_url, max_pages, max_depth, same_domain = job.start_url, job.max_pages, job.max_depth, job.same_domain
+    try:
+        payload = discover_site(job_id, start_url, max_pages, max_depth, same_domain)
+    except Exception as exc:
+        raise HTTPException(502, f"Discovery fehlgeschlagen: {type(exc).__name__}: {exc}\n"
+                                 f"{traceback.format_exc(limit=5)}")
+    return payload
+
+
+@app.get("/api/jobs/{job_id}/discover")
+def get_discovery(job_id: int):
+    payload = load_discovery(job_id)
+    if not payload:
+        return {"pages": [], "count": 0, "note": "Noch keine Discovery gelaufen – Button 'Seiten entdecken' klicken"}
+    return payload
+
+
 @app.post("/api/jobs/{job_id}/run")
 def trigger_run(job_id: int):
     with Session(engine) as db:
@@ -492,12 +790,28 @@ def get_run(run_id: int):
 
 @app.get("/api/jobs/{job_id}/pages")
 def list_pages(job_id: int):
+    """Index: jede Unterseite mit Nr, Seitenname/Titel, URL und HTML-Datei."""
     dest = job_dir(job_id)
     mp = dest / "mapping.json"
     if not mp.exists():
-        return {"pages": [], "note": "Noch kein Backup gelaufen"}
+        disc = load_discovery(job_id)
+        if disc and disc.get("pages"):
+            return {"pages": [], "discovered": disc["pages"],
+                    "note": "Discovery vorhanden, noch kein Backup gelaufen"}
+        return {"pages": [], "note": "Noch keine Discovery / noch kein Backup gelaufen"}
     mapping = json.loads(mp.read_text(encoding="utf-8"))
-    return {"pages": [{"url": u, **v} for u, v in mapping.items()]}
+    pages = sorted(({"url": u, **v} for u, v in mapping.items()),
+                   key=lambda p: (p.get("nr") or 999999))
+    return {"pages": pages}
+
+
+@app.get("/api/jobs/{job_id}/index")
+def download_index(job_id: int):
+    """Inhaltsverzeichnis (Nr, Seitenname, URL, Datei) als HTML."""
+    idx = job_dir(job_id) / "index.html"
+    if not idx.exists():
+        raise HTTPException(404, "Noch kein Index vorhanden – erst Backup starten")
+    return FileResponse(idx, media_type="text/html", filename=f"sitebackup-job-{job_id}-index.html")
 
 
 @app.get("/api/jobs/{job_id}/download")

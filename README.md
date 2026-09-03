@@ -1,8 +1,14 @@
 # WebseitenBackup (SiteBackup)
 
-Komplette Webseite lokal sichern: Jede Unterseite wird als `.html`-Datei
-gespeichert, alles als ZIP ladbar. Zeitplan pro Job: manuell · stündlich ·
-täglich · wöchentlich · monatlich · Cron. Details: [`sitebackup/README.md`](sitebackup/README.md).
+Komplette Webseite lokal sichern – in 2 Phasen (v1.1):
+
+1. **Discovery:** alle Unterseiten herausfinden via `robots.txt` + `sitemap.xml`
+   + Link-Crawl → indexierte Liste (Nr, Seitenname, URL, Quelle).
+2. **Backup:** jede Unterseite einzeln als `.html`-Datei sichern, mit Titel-Index
+   und Inhaltsverzeichnis. Download komplett als ZIP oder jede Seite einzeln.
+
+Zeitplan pro Job: manuell · stündlich · täglich · wöchentlich · monatlich · Cron.
+Details: [`sitebackup/README.md`](sitebackup/README.md).
 
 ## Installation auf Proxmox (Einzeiler)
 

@@ -20,13 +20,17 @@ button:disabled{opacity:.5}table{width:100%;border-collapse:collapse;font-size:1
 th,td{text-align:left;padding:8px;border-bottom:1px solid #334155;vertical-align:top}
 a{color:#38bdf8}.pill{font-size:11px;padding:2px 8px;border-radius:99px;background:#334155}
 .pill.ok{background:#14532d}.pill.err{background:#7f1d1d}.pill.run{background:#713f12}
+.pill.src-sitemap{background:#0c4a6e}.pill.src-link{background:#3b0764}.pill.src-start{background:#14532d}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 pre{background:#0f172a;border:1px solid #334155;border-radius:9px;padding:10px;max-height:240px;overflow:auto;font-size:12px;white-space:pre-wrap}
 .hint{font-size:12px;color:#94a3b8}
+.steps{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.step{font-size:12px;padding:4px 10px;border-radius:99px;background:#334155}
+.step.done{background:#14532d}.step.active{background:#0c4a6e}
 </style>
 </head>
 <body>
-<header><div class="logo">SB</div><div><h1>SiteBackup</h1><div class="sub">Komplette Webseite sichern – jede Unterseite als HTML-Datei</div></div></header>
+<header><div class="logo">SB</div><div><h1>SiteBackup</h1><div class="sub">1. Unterseiten entdecken &amp; indexieren → 2. Seite für Seite als HTML sichern</div></div></header>
 <main>
 <div class="card">
 <h2>Neuer Backup-Job</h2>
@@ -45,16 +49,15 @@ pre{background:#0f172a;border:1px solid #334155;border-radius:9px;padding:10px;m
 <div id="w_mday" style="display:none"><label>Monatstag (1–28)</label><input id="f_mday" type="number" value="1" min="1" max="28"></div>
 <div id="w_cron" style="display:none"><label>Cron (m h dom mon dow)</label><input id="f_cron" placeholder="0 3 * * 1"></div>
 </div>
-<p class="hint">Wöchentlich = z. B. jeden Montag 03:00 · Monatlich = am Monatstag um Uhrzeit · Cron z. B. <code>0 3 * * 1</code> (montags 03:00), <code>0 2 1 * *</code> (monatlich am 1. um 02:00).</p>
+<p class="hint">Wöchentlich = z. B. jeden Montag 03:00 · Monatlich = am Monatstag um Uhrzeit · Cron z. B. <code>0 3 * * 1</code> (montags 03:00).</p>
 <div class="row"><button onclick="saveJob()">Job speichern</button><span id="formMsg" class="hint"></span></div>
 </div>
 
-<div class="card"><h2>Jobs</h2><div id="jobs">Lade …</div></div>
+<div class="card"><h2>Jobs – in 2 Schritten sichern</h2><div id="jobs">Lade …</div></div>
 <div class="card"><h2>Letzte Läufe</h2><div id="runs">Lade …</div></div>
-<div class="card"><h2>Details / Log</h2><div id="detail" class="hint">Job anklicken → Seitenliste, ZIP-Download, Einzelseiten als HTML.</div></div>
+<div class="card"><h2>Details: Index / Downloads / Log</h2><div id="detail" class="hint">Schritt 1: „Seiten entdecken“ → indexierte Liste aller Unterseiten.<br>Schritt 2: „Backup starten“ → jede Seite einzeln als HTML + alles als ZIP.</div></div>
 </main>
 <script>
-let EDIT_ID=null;
 function schedUI(){const s=document.getElementById('f_sched').value;
 document.getElementById('w_time').style.display=(s==='hourly'||s==='manual')?(s==='hourly'?'block':'none'):(s==='cron'?'none':'block');
 document.getElementById('w_wday').style.display=s==='weekly'?'block':'none';
@@ -63,23 +66,31 @@ document.getElementById('w_cron').style.display=s==='cron'?'block':'none';}
 schedUI();
 async function api(p,o){const r=await fetch(p,o);const t=await r.text();let j;try{j=JSON.parse(t)}catch{j={detail:t}}if(!r.ok)throw new Error(j.detail||('HTTP '+r.status));return j;}
 async function load(){const jobs=await api('/api/jobs');const runs=await api('/api/runs?limit=20');
-let h='<table><tr><th>Name / URL</th><th>Plan</th><th>Nächster Lauf</th><th>Aktion</th></tr>';
-for(const j of jobs){h+=`<tr><td><b>${esc(j.name)}</b><br><a href="${esc(j.start_url)}" target="_blank">${esc(j.start_url)}</a><br><span class="hint">max ${j.max_pages} Seiten · Tiefe ${j.max_depth}</span></td><td>${planTxt(j)}</td><td class="hint">${j.next_run||'–'}</td><td><div class="row"><button onclick="runJob(${j.id})">Jetzt sichern</button><button class="ghost" onclick="showJob(${j.id})">Details</button><a href="/api/jobs/${j.id}/download"><button class="ghost">ZIP</button></a><button class="danger" onclick="delJob(${j.id})">Löschen</button></div></td></tr>`;}
+let h='<table><tr><th>Name / URL</th><th>Plan</th><th>Nächster Lauf</th><th>Schritt 1 → Schritt 2</th></tr>';
+for(const j of jobs){h+=`<tr><td><b>${esc(j.name)}</b><br><a href="${esc(j.start_url)}" target="_blank">${esc(j.start_url)}</a><br><span class="hint">max ${j.max_pages} Seiten · Tiefe ${j.max_depth}</span></td><td>${planTxt(j)}</td><td class="hint">${j.next_run||'–'}</td><td><div class="row"><button class="ghost" onclick="discoverJob(${j.id},this)">1. Seiten entdecken</button><button onclick="runJob(${j.id})">2. Backup starten</button><button class="ghost" onclick="showJob(${j.id})">Index &amp; Downloads</button><a href="/api/jobs/${j.id}/download"><button class="ghost">ZIP</button></a><button class="danger" onclick="delJob(${j.id})">Löschen</button></div></td></tr>`;}
 h+='</table>';document.getElementById('jobs').innerHTML=jobs.length?h:'Noch keine Jobs.';
 let r2='<table><tr><th>Run</th><th>Status</th><th>Seiten</th><th>Größe</th></tr>';
-for(const r of runs){r2+=`<tr><td>#${r.id} · Job ${r.job_id}<br><span class="hint">${r.started_at||''}</span></td><td><span class="pill ${r.status==='ok'?'ok':r.status==='running'?'run':'err'}">${r.status}</span>${r.error?'<br><span class="hint">'+esc(r.error.slice(0,120))+'</span>':''}</td><td>OK ${r.pages_ok} · Fehler ${r.pages_failed}</td><td>${(r.total_bytes/1024).toFixed(1)} KB · <a href="#" onclick="showLog(${r.id});return false">Log</a></td></tr>`;}
+for(const r of runs){const last=(r.log||'').trim().split('\n').pop()||'';r2+=`<tr><td>#${r.id} · Job ${r.job_id}<br><span class="hint">${r.started_at||''}</span></td><td><span class="pill ${r.status==='ok'?'ok':r.status==='running'?'run':'err'}">${r.status}</span>${r.error?'<br><span class="hint">'+esc(r.error.slice(0,120))+'</span>':''}</td><td>OK ${r.pages_ok} · Fehler ${r.pages_failed}${r.status==='running'&&last?'<br><span class="hint">'+esc(last.slice(0,90))+'</span>':''}</td><td>${(r.total_bytes/1024).toFixed(1)} KB · <a href="#" onclick="showLog(${r.id});return false">Log</a></td></tr>`;}
 document.getElementById('runs').innerHTML=runs.length?r2+'':'Noch keine Läufe.';}
 function planTxt(j){if(j.schedule==='manual')return 'manuell';if(j.schedule==='hourly')return 'stündlich';if(j.schedule==='daily')return `täglich ${j.schedule_time}`;if(j.schedule==='weekly')return `wöchentlich ${j.schedule_weekday} ${j.schedule_time}`;if(j.schedule==='monthly')return `monatlich am ${j.schedule_day}. ${j.schedule_time}`;return 'cron '+j.cron_expr;}
 function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 async function saveJob(){const b={name:v('f_name'),start_url:v('f_url'),max_pages:+v('f_pages'),max_depth:+v('f_depth'),same_domain:v('f_same')==='1',schedule:v('f_sched'),schedule_time:v('f_time'),schedule_weekday:v('f_wday'),schedule_day:+v('f_mday'),cron_expr:v('f_cron'),enabled:true};
-try{document.getElementById('formMsg').textContent='Speichere …';await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});document.getElementById('formMsg').textContent='Gespeichert ✓';load();}catch(e){document.getElementById('formMsg').textContent='Fehler: '+e.message;}}
+try{document.getElementById('formMsg').textContent='Speichere …';await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});document.getElementById('formMsg').textContent='Gespeichert ✓ – jetzt Schritt 1: Seiten entdecken';load();}catch(e){document.getElementById('formMsg').textContent='Fehler: '+e.message;}}
 function v(id){return document.getElementById(id).value.trim();}
-async function runJob(id){await api('/api/jobs/'+id+'/run',{method:'POST'});alert('Backup gestartet – gleich unter „Letzte Läufe“ prüfen.');setTimeout(load,3000);}
+async function discoverJob(id,btn){try{if(btn){btn.disabled=true;btn.textContent='Entdecke …';}document.getElementById('detail').innerHTML='Durchsuche robots.txt → sitemap.xml → Links …';
+const d=await api('/api/jobs/'+id+'/discover',{method:'POST'});showDiscovery(id,d);}catch(e){document.getElementById('detail').innerHTML='Discovery-Fehler: '+esc(e.message);}finally{if(btn){btn.disabled=false;btn.textContent='1. Seiten entdecken';}load();}}
+function showDiscovery(id,d){const pages=d.pages||[];let h=`<div class="steps"><span class="step done">1. Discovery: ${d.count} Unterseiten gefunden ✓</span><span class="step active">2. jetzt Backup starten</span></div><div class="row"><button onclick="runJob(${id})">2. Alle ${d.count} Seiten jetzt sichern</button><span class="hint">Quellen: Sitemap + Links (wie web-check)</span></div><table><tr><th>Nr</th><th>Seitenname</th><th>URL</th><th>Quelle</th></tr>`;
+for(const p of pages.slice(0,500)){h+=`<tr><td>${p.nr}</td><td><b>${esc(p.title||'(ohne Titel)')}</b></td><td><a href="${esc(p.url)}" target="_blank">${esc(p.url)}</a></td><td><span class="pill src-${esc(p.source)}">${esc(p.source)}</span></td></tr>`;}
+if(pages.length>500)h+=`<tr><td colspan="4" class="hint">… + ${pages.length-500} weitere (komplett in discovery.json)</td></tr>`;
+document.getElementById('detail').innerHTML=h+'</table>';document.getElementById('detail').scrollIntoView();}
+async function runJob(id){await api('/api/jobs/'+id+'/run',{method:'POST'});document.getElementById('detail').innerHTML='Backup läuft Seite für Seite … Fortschritt unter „Letzte Läufe“ (alle 15 s aktualisiert).';setTimeout(load,3000);}
 async function delJob(id){if(!confirm('Job '+id+' + alle Runs wirklich löschen? Dateien bleiben unter data/jobs/'+id+'/ erhalten.'))return;await api('/api/jobs/'+id,{method:'DELETE'});load();}
-async function showJob(id){const d=await api('/api/jobs/'+id+'/pages');let h=`<div class="row"><a href="/api/jobs/${id}/download"><button>Alles als ZIP laden</button></a></div><p class="hint">${d.pages.length} Seiten</p><table><tr><th>URL</th><th>Datei</th></tr>`;
-for(const p of d.pages.slice(0,500)){h+=`<tr><td><a href="${esc(p.url)}" target="_blank">${esc(p.url)}</a>${p.note?'<br><span class="hint">'+esc(p.note)+'</span>':''}</td><td>${p.file?`<a href="/api/jobs/${id}/page?file=${encodeURIComponent(p.file)}" target="_blank">${esc(p.file)}</a>`:'<span class="hint">–</span>'}</td></tr>`;}
-document.getElementById('detail').innerHTML=h;document.getElementById('detail').scrollIntoView();}
-async function showLog(id){const r=await api('/api/runs/'+id);document.getElementById('detail').innerHTML=`<b>Run #${id}</b><pre>${esc(r.log||r.error||'(leer)')}</pre>`;document.getElementById('detail').scrollIntoView();}
+async function showJob(id){const d=await api('/api/jobs/'+id+'/pages');
+if(d.discovered){showDiscovery(id,{count:d.discovered.length,pages:d.discovered});return;}
+let h=`<div class="steps"><span class="step done">1. Discovery ✓</span><span class="step done">2. Backup ✓ (${d.pages.length} Seiten)</span></div><div class="row"><a href="/api/jobs/${id}/download"><button>Alles als ZIP laden (komplett)</button></a><a href="/api/jobs/${id}/index" target="_blank"><button class="ghost">Index öffnen</button></a></div><p class="hint">Jede Zeile = eine Unterseite mit Seitennamen → einzelne HTML-Datei ladbar.</p><table><tr><th>Nr</th><th>Seitenname</th><th>URL</th><th>HTML-Datei (einzeln)</th></tr>`;
+for(const p of d.pages.slice(0,500)){h+=`<tr><td>${p.nr??'–'}</td><td><b>${esc(p.title||p.page_name||'(ohne Titel)')}</b>${p.note?'<br><span class="hint">'+esc(String(p.note).slice(0,100))+'</span>':''}</td><td><a href="${esc(p.url)}" target="_blank">${esc(p.url)}</a></td><td>${p.file?`<a href="/api/jobs/${id}/page?file=${encodeURIComponent(p.file)}" target="_blank">${esc(p.file)}</a>`:'<span class="hint">–</span>'}</td></tr>`;}
+document.getElementById('detail').innerHTML=h+'</table>';document.getElementById('detail').scrollIntoView();}
+async function showLog(id){const r=await api('/api/runs/'+id);document.getElementById('detail').innerHTML=`<b>Run #${id} (Job ${r.job_id})</b><pre>${esc(r.log||r.error||'(leer)')}</pre>`;document.getElementById('detail').scrollIntoView();}
 load();setInterval(load,15000);
 </script>
 </body>
