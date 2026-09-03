@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SiteBackup – Webseiten-Backup</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,sans-serif;background:#0f172a;color:#e2e8f0}
+header{background:#1e293b;padding:16px 22px;display:flex;align-items:center;gap:12px;position:sticky;top:0}
+.logo{width:38px;height:38px;border-radius:10px;background:#38bdf8;color:#0f172a;display:grid;place-items:center;font-weight:800}
+main{max-width:1080px;margin:0 auto;padding:22px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:14px;padding:18px;margin-bottom:18px}
+h1{font-size:19px;margin:0}h2{font-size:16px;margin:0 0 12px}.sub{color:#94a3b8;font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+label{font-size:12px;color:#94a3b8;display:block;margin-bottom:4px}
+input,select{width:100%;padding:9px 10px;border-radius:9px;border:1px solid #334155;background:#0f172a;color:#e2e8f0}
+button{padding:9px 14px;border:0;border-radius:9px;background:#38bdf8;color:#0f172a;font-weight:700;cursor:pointer}
+button.ghost{background:#334155;color:#e2e8f0}button.danger{background:#f87171}
+button:disabled{opacity:.5}table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px;border-bottom:1px solid #334155;vertical-align:top}
+a{color:#38bdf8}.pill{font-size:11px;padding:2px 8px;border-radius:99px;background:#334155}
+.pill.ok{background:#14532d}.pill.err{background:#7f1d1d}.pill.run{background:#713f12}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+pre{background:#0f172a;border:1px solid #334155;border-radius:9px;padding:10px;max-height:240px;overflow:auto;font-size:12px;white-space:pre-wrap}
+.hint{font-size:12px;color:#94a3b8}
+</style>
+</head>
+<body>
+<header><div class="logo">SB</div><div><h1>SiteBackup</h1><div class="sub">Komplette Webseite sichern – jede Unterseite als HTML-Datei</div></div></header>
+<main>
+<div class="card">
+<h2>Neuer Backup-Job</h2>
+<div class="grid">
+<div><label>Name</label><input id="f_name" placeholder="z. B. Firmenwebseite"></div>
+<div style="grid-column:span 2"><label>Start-URL</label><input id="f_url" placeholder="https://example.com"></div>
+<div><label>Max. Seiten</label><input id="f_pages" type="number" value="100" min="1" max="5000"></div>
+<div><label>Max. Tiefe</label><input id="f_depth" type="number" value="3" min="0" max="10"></div>
+<div><label>Nur eigene Domain?</label><select id="f_same"><option value="1">Ja (empfohlen)</option><option value="0">Nein (folgt externen Links)</option></select></div>
+<div><label>Zeitplan</label><select id="f_sched" onchange="schedUI()">
+<option value="manual">Manuell</option><option value="hourly">Stündlich</option><option value="daily">Täglich</option>
+<option value="weekly" selected>Wöchentlich</option><option value="monthly">Monatlich</option><option value="cron">Cron-Ausdruck</option>
+</select></div>
+<div id="w_time"><label>Uhrzeit (HH:MM)</label><input id="f_time" value="03:00"></div>
+<div id="w_wday"><label>Wochentag</label><select id="f_wday"><option value="mon">Montag</option><option value="tue">Dienstag</option><option value="wed">Mittwoch</option><option value="thu">Donnerstag</option><option value="fri">Freitag</option><option value="sat">Samstag</option><option value="sun">Sonntag</option></select></div>
+<div id="w_mday" style="display:none"><label>Monatstag (1–28)</label><input id="f_mday" type="number" value="1" min="1" max="28"></div>
+<div id="w_cron" style="display:none"><label>Cron (m h dom mon dow)</label><input id="f_cron" placeholder="0 3 * * 1"></div>
+</div>
+<p class="hint">Wöchentlich = z. B. jeden Montag 03:00 · Monatlich = am Monatstag um Uhrzeit · Cron z. B. <code>0 3 * * 1</code> (montags 03:00), <code>0 2 1 * *</code> (monatlich am 1. um 02:00).</p>
+<div class="row"><button onclick="saveJob()">Job speichern</button><span id="formMsg" class="hint"></span></div>
+</div>
+
+<div class="card"><h2>Jobs</h2><div id="jobs">Lade …</div></div>
+<div class="card"><h2>Letzte Läufe</h2><div id="runs">Lade …</div></div>
+<div class="card"><h2>Details / Log</h2><div id="detail" class="hint">Job anklicken → Seitenliste, ZIP-Download, Einzelseiten als HTML.</div></div>
+</main>
+<script>
+let EDIT_ID=null;
+function schedUI(){const s=document.getElementById('f_sched').value;
+document.getElementById('w_time').style.display=(s==='hourly'||s==='manual')?(s==='hourly'?'block':'none'):(s==='cron'?'none':'block');
+document.getElementById('w_wday').style.display=s==='weekly'?'block':'none';
+document.getElementById('w_mday').style.display=s==='monthly'?'block':'none';
+document.getElementById('w_cron').style.display=s==='cron'?'block':'none';}
+schedUI();
+async function api(p,o){const r=await fetch(p,o);const t=await r.text();let j;try{j=JSON.parse(t)}catch{j={detail:t}}if(!r.ok)throw new Error(j.detail||('HTTP '+r.status));return j;}
+async function load(){const jobs=await api('/api/jobs');const runs=await api('/api/runs?limit=20');
+let h='<table><tr><th>Name / URL</th><th>Plan</th><th>Nächster Lauf</th><th>Aktion</th></tr>';
+for(const j of jobs){h+=`<tr><td><b>${esc(j.name)}</b><br><a href="${esc(j.start_url)}" target="_blank">${esc(j.start_url)}</a><br><span class="hint">max ${j.max_pages} Seiten · Tiefe ${j.max_depth}</span></td><td>${planTxt(j)}</td><td class="hint">${j.next_run||'–'}</td><td><div class="row"><button onclick="runJob(${j.id})">Jetzt sichern</button><button class="ghost" onclick="showJob(${j.id})">Details</button><a href="/api/jobs/${j.id}/download"><button class="ghost">ZIP</button></a><button class="danger" onclick="delJob(${j.id})">Löschen</button></div></td></tr>`;}
+h+='</table>';document.getElementById('jobs').innerHTML=jobs.length?h:'Noch keine Jobs.';
+let r2='<table><tr><th>Run</th><th>Status</th><th>Seiten</th><th>Größe</th></tr>';
+for(const r of runs){r2+=`<tr><td>#${r.id} · Job ${r.job_id}<br><span class="hint">${r.started_at||''}</span></td><td><span class="pill ${r.status==='ok'?'ok':r.status==='running'?'run':'err'}">${r.status}</span>${r.error?'<br><span class="hint">'+esc(r.error.slice(0,120))+'</span>':''}</td><td>OK ${r.pages_ok} · Fehler ${r.pages_failed}</td><td>${(r.total_bytes/1024).toFixed(1)} KB · <a href="#" onclick="showLog(${r.id});return false">Log</a></td></tr>`;}
+document.getElementById('runs').innerHTML=runs.length?r2+'':'Noch keine Läufe.';}
+function planTxt(j){if(j.schedule==='manual')return 'manuell';if(j.schedule==='hourly')return 'stündlich';if(j.schedule==='daily')return `täglich ${j.schedule_time}`;if(j.schedule==='weekly')return `wöchentlich ${j.schedule_weekday} ${j.schedule_time}`;if(j.schedule==='monthly')return `monatlich am ${j.schedule_day}. ${j.schedule_time}`;return 'cron '+j.cron_expr;}
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+async function saveJob(){const b={name:v('f_name'),start_url:v('f_url'),max_pages:+v('f_pages'),max_depth:+v('f_depth'),same_domain:v('f_same')==='1',schedule:v('f_sched'),schedule_time:v('f_time'),schedule_weekday:v('f_wday'),schedule_day:+v('f_mday'),cron_expr:v('f_cron'),enabled:true};
+try{document.getElementById('formMsg').textContent='Speichere …';await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});document.getElementById('formMsg').textContent='Gespeichert ✓';load();}catch(e){document.getElementById('formMsg').textContent='Fehler: '+e.message;}}
+function v(id){return document.getElementById(id).value.trim();}
+async function runJob(id){await api('/api/jobs/'+id+'/run',{method:'POST'});alert('Backup gestartet – gleich unter „Letzte Läufe“ prüfen.');setTimeout(load,3000);}
+async function delJob(id){if(!confirm('Job '+id+' + alle Runs wirklich löschen? Dateien bleiben unter data/jobs/'+id+'/ erhalten.'))return;await api('/api/jobs/'+id,{method:'DELETE'});load();}
+async function showJob(id){const d=await api('/api/jobs/'+id+'/pages');let h=`<div class="row"><a href="/api/jobs/${id}/download"><button>Alles als ZIP laden</button></a></div><p class="hint">${d.pages.length} Seiten</p><table><tr><th>URL</th><th>Datei</th></tr>`;
+for(const p of d.pages.slice(0,500)){h+=`<tr><td><a href="${esc(p.url)}" target="_blank">${esc(p.url)}</a>${p.note?'<br><span class="hint">'+esc(p.note)+'</span>':''}</td><td>${p.file?`<a href="/api/jobs/${id}/page?file=${encodeURIComponent(p.file)}" target="_blank">${esc(p.file)}</a>`:'<span class="hint">–</span>'}</td></tr>`;}
+document.getElementById('detail').innerHTML=h;document.getElementById('detail').scrollIntoView();}
+async function showLog(id){const r=await api('/api/runs/'+id);document.getElementById('detail').innerHTML=`<b>Run #${id}</b><pre>${esc(r.log||r.error||'(leer)')}</pre>`;document.getElementById('detail').scrollIntoView();}
+load();setInterval(load,15000);
+</script>
+</body>
+</html>

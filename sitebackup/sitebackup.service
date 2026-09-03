@@ -1,0 +1,18 @@
+[Unit]
+Description=SiteBackup – Webseiten-Backup (lokal)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sitebackup/sitebackup
+ExecStart=/opt/sitebackup/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8090
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+Environment=SITEBACKUP_DATA_DIR=/opt/sitebackup/data
+Environment=SITEBACKUP_PORT=8090
+
+[Install]
+WantedBy=multi-user.target
