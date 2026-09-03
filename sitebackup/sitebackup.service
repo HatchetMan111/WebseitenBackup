@@ -13,6 +13,12 @@ RestartSec=10
 Environment=PYTHONUNBUFFERED=1
 Environment=SITEBACKUP_DATA_DIR=/opt/sitebackup/data
 Environment=SITEBACKUP_PORT=8090
+# Haertung (App schreibt nur nach /opt/sitebackup/data + eigenes /tmp)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/sitebackup/data
 
 [Install]
 WantedBy=multi-user.target

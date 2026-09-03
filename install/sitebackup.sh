@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 SiteBackup
-# License: MIT | https://github.com/USER/sitebackup
+# License: MIT | https://github.com/HatchetMan111/WebseitenBackup
 #
 # LXC Container Installer fuer Proxmox VE - im Stil der Community-Scripts.
 # Erstellt einen unprivilegierten Debian-12-Container und installiert
@@ -20,7 +20,6 @@ var_version="12"
 var_port="8090"
 DEFAULT_CTID="251"
 REPO_URL="https://github.com/HatchetMan111/WebseitenBackup.git"
-APP_DIR="/opt/sitebackup"
 
 YW='\033[33m'
 GN='\033[1;32m'
@@ -102,6 +101,10 @@ CTID="${CTID:-$DEFAULT_CTID}"
 if ! [[ "$CTID" =~ ^[0-9]+$ ]] || [[ "$CTID" -lt 100 ]]; then
   die "Ungueltige Container-ID: '$CTID' (muss eine Zahl >= 100 sein)"
 fi
+
+echo -ne "${YW}Optionales Web-UI-Passwort (Eingabe versteckt, leer = offen im LAN): ${CL}"
+read -rs APP_PW
+echo ""
 
 if pct status "$CTID" &>/dev/null; then
   if [[ "$CTID" == "$DEFAULT_CTID" ]]; then
@@ -187,6 +190,23 @@ mkdir -p /opt/sitebackup/data /opt/sitebackup/data/jobs
 SB_SETUP
 msg_ok "SiteBackup geklont"
 
+# ── Optionales Passwort als Datei (App liest Env ODER data/app.password) ─
+pct exec "$CTID" -- env SB_PW="$APP_PW" bash <<'SB_SETUP'
+set -e
+mkdir -p /opt/sitebackup/data
+if [[ -n "$SB_PW" ]]; then
+  printf '%s' "$SB_PW" > /opt/sitebackup/data/app.password
+  chmod 600 /opt/sitebackup/data/app.password
+else
+  rm -f /opt/sitebackup/data/app.password
+fi
+SB_SETUP
+if [[ -n "$APP_PW" ]]; then
+  msg_ok "Passwortschutz aktiviert"
+else
+  msg_ok "Kein Passwort (Web UI offen im LAN)"
+fi
+
 # ── Python-Pakete in venv ───────────────────────────────────────────
 msg_info "Installiere Python-Pakete in venv (FastAPI, Uvicorn, SQLAlchemy, httpx, bs4, APScheduler)"
 pct exec "$CTID" -- bash <<'SB_SETUP'
@@ -234,8 +254,27 @@ fi
 pct exec "$CTID" -- curl -fsS "http://localhost:${var_port}/api/health" >/dev/null \
   || die "API antwortet nicht auf http://localhost:${var_port}/api/health"
 FRONT_CODE=$(pct exec "$CTID" -- bash -c "curl -s -o /dev/null -w '%{http_code}' http://localhost:${var_port}/")
-[[ "$FRONT_CODE" == "200" ]] || die "Web UI antwortet nicht (HTTP $FRONT_CODE statt 200)."
+# Hinweis: Mit Passwort leitet / auf /login weiter (302) - das ist dann ERFOLG.
+if [[ "$FRONT_CODE" == "200" ]]; then
+  pct exec "$CTID" -- env SB_PORT="$var_port" bash -c 'curl -fsS http://localhost:$SB_PORT/ | grep -q "SiteBackup"' \
+    || die "Web UI wird nicht korrekt ausgeliefert."
+elif [[ "$FRONT_CODE" =~ ^(301|302|307|308)$ ]]; then
+  pct exec "$CTID" -- env SB_PORT="$var_port" bash -c 'curl -fsS http://localhost:$SB_PORT/login | grep -q "Anmelden"' \
+    || die "Login-Seite wird nicht korrekt ausgeliefert."
+else
+  die "Web UI antwortet nicht (HTTP $FRONT_CODE)."
+fi
 msg_ok "Installation verifiziert"
+
+if [[ -n "$APP_PW" ]]; then
+  msg_info "Pruefe Passwortschutz"
+  CODE=$(pct exec "$CTID" -- env SB_PORT="$var_port" bash -c 'curl -s -o /dev/null -w "%{http_code}" http://localhost:$SB_PORT/')
+  if [[ "$CODE" =~ ^(301|302|307|308)$ ]]; then
+    msg_ok "Passwortschutz aktiv (Login erforderlich)"
+  else
+    die "Passwortschutz NICHT aktiv (HTTP $CODE statt Login-Redirect)! Passwortdatei pruefen: pct exec $CTID -- ls -l /opt/sitebackup/data/app.password"
+  fi
+fi
 
 # ── IP ermitteln ────────────────────────────────────────────────────
 msg_info "Ermittle Container-IP"
@@ -257,6 +296,11 @@ echo -e "  ${CM} Health:       ${YW}http://${CT_IP}:${var_port}/api/health${CL}"
 echo -e "  ${CM} Service:      ${YW}systemctl status sitebackup${CL}"
 echo -e "  ${CM} Logs:         ${YW}journalctl -u sitebackup -f${CL}"
 echo -e "  ${CM} Daten:        ${YW}/opt/sitebackup/data/jobs/<job-id>/${CL}"
+if [[ -n "$APP_PW" ]]; then
+  echo -e "  ${CM} Login:        ${YW}Passwortschutz aktiv${CL}"
+else
+  echo -e "  ${CM} Login:        ${YW}kein Passwort (offen im LAN)${CL}"
+fi
 echo ""
 echo -e "  ${YW}Container-Shell:${CL}"
 echo -e "  ${YW}  pct enter ${CTID}${CL}"

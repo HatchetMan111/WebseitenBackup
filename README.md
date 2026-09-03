@@ -1,11 +1,14 @@
 # WebseitenBackup (SiteBackup)
 
-Komplette Webseite lokal sichern – in 2 Phasen (v1.1):
+Komplette Webseite lokal sichern – in 2 Phasen (v1.3):
 
 1. **Discovery:** alle Unterseiten herausfinden via `robots.txt` + `sitemap.xml`
    + Link-Crawl → indexierte Liste (Nr, Seitenname, URL, Quelle).
 2. **Backup:** jede Unterseite einzeln als `.html`-Datei sichern, mit Titel-Index
-   und Inhaltsverzeichnis. Download komplett als ZIP oder jede Seite einzeln.
+   und Inhaltsverzeichnis. **Bilder/CSS/JS werden mitgeladen und Links
+   umgeschrieben → offline lesbar.** Download komplett als ZIP
+   (`<job>_job-<id>_<datum>.zip`) oder jede Seite einzeln.
+3. **Suche:** Volltextsuche (FTS5) über Titel + Text aller gesicherten Seiten.
 
 Zeitplan pro Job: manuell · stündlich · täglich · wöchentlich · monatlich · Cron.
 Details: [`sitebackup/README.md`](sitebackup/README.md).
