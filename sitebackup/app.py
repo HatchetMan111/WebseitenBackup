@@ -7,17 +7,24 @@ Ablauf pro Job (2 Phasen, wie web-check erst analysieren, dann sichern):
 2. BACKUP: Unterseite fuer Unterseite als .html-Datei unter
    data/jobs/<id>/pages/ sichern, mit Titel-Index (mapping.json) und
    Inhaltsverzeichnis (index.html). Download komplett als ZIP oder einzeln.
+3. EINZEL-HTML: die gesamte Website als EINE selbstenthaltene HTML-Datei
+   (Assets als data-URI, Seiten als Section + Inhaltsverzeichnis, Navigation
+   offline klickbar) – portabel, auf jeder Plattform, fuer immer. Optional
+   auch pro Unterseite (/single-page).
 - Zeitplan: manuell/stuendlich/taeglich/woechentlich/monatlich/cron
   (APScheduler, reboot-sicher via DB + Scheduler).
-- Web UI: statische Datei static/index.html, keine Build-Tools noetig.
+- Web UI: React/Vite-Dashboard (Fertig-Build in static/ committed,
+  keine Build-Tools noetig im Container).
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import html as htmlmod
 import hmac
 import ipaddress
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -143,7 +150,7 @@ async def _lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="SiteBackup", version="1.3.0", lifespan=_lifespan)
+app = FastAPI(title="SiteBackup", version="1.4.0", lifespan=_lifespan)
 
 # ---------------------------------------------------------------- Optionales Passwort (LAN-Schutz)
 # Setzen via Env SITEBACKUP_PASSWORD oder Datei data/app.password
@@ -250,13 +257,17 @@ class JobIn(BaseModel):
             raise ValueError(f"schedule muss einer von {SCHEDULES} sein")
         if not re.match(r"^https?://", self.start_url.strip()):
             raise ValueError("start_url muss mit http:// oder https:// beginnen")
-        m = re.match(r"^(\d{1,2}):(\d{2})$", (self.schedule_time or "").strip())
-        if not m:
-            raise ValueError("schedule_time muss HH:MM sein (z.B. 03:00)")
-        hh, mm = int(m.group(1)), int(m.group(2))
-        if hh > 23 or mm > 59:
-            raise ValueError("schedule_time ausserhalb 00:00–23:59")
-        sched_time = f"{hh:02d}:{mm:02d}"
+        # Uhrzeit nur bei geplanten Modi verpflichtend (manual braucht keine)
+        if sched == "manual":
+            sched_time = "03:00"
+        else:
+            m = re.match(r"^(\d{1,2}):(\d{2})$", (self.schedule_time or "").strip())
+            if not m:
+                raise ValueError("schedule_time muss HH:MM sein (z.B. 03:00)")
+            hh, mm = int(m.group(1)), int(m.group(2))
+            if hh > 23 or mm > 59:
+                raise ValueError("schedule_time ausserhalb 00:00–23:59")
+            sched_time = f"{hh:02d}:{mm:02d}"
         wd = (self.schedule_weekday or "mon").lower()[:3]
         if wd not in WEEKDAYS:
             raise ValueError("schedule_weekday muss mon..sun sein")
@@ -395,6 +406,28 @@ def fetch_raw(client: httpx.Client, url: str, max_bytes: int) -> dict:
             "raw": b"", "truncated": False, "error": "Zu viele Redirects"}
 
 
+def _decode_html(raw: bytes, content_type: str) -> str:
+    """HTML-Bytes dekodieren: charset aus Header oder <meta> sniffern,
+    BOM respektieren, Fallback utf-8. (Fix: ISO-8859-1-Seiten zerlesen nicht mehr.)"""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:].decode("utf-8", errors="replace")
+    enc = None
+    m = re.search(r"charset=([A-Za-z0-9_\-]+)", content_type or "", re.IGNORECASE)
+    if m:
+        enc = m.group(1).lower()
+    if not enc:
+        m = re.search(r"""charset\s*=\s*["']?\s*([A-Za-z0-9_\-]+)""",
+                      raw[:2048].decode("ascii", errors="ignore"), re.IGNORECASE)
+        if m:
+            enc = m.group(1).lower()
+    if enc:
+        try:
+            return raw.decode(enc, errors="replace")
+        except (LookupError, UnicodeDecodeError):
+            pass
+    return raw.decode("utf-8", errors="replace")
+
+
 def fetch_page(client: httpx.Client, url: str, max_bytes: int = MAX_HTML_BYTES) -> dict:
     """Eine Seite holen mit SSRF-Check, manuellen (validierten) Redirects und
     Streaming-Limit (kein unbegrenztes Laden in RAM).
@@ -402,11 +435,7 @@ def fetch_page(client: httpx.Client, url: str, max_bytes: int = MAX_HTML_BYTES) 
     keys: url, status, content_type, text, truncated, error
     """
     r = fetch_raw(client, url, max_bytes)
-    try:
-        enc = "utf-8"
-        text = r["raw"].decode(enc, errors="replace")
-    except Exception:
-        text = ""
+    text = _decode_html(r["raw"], r["content_type"]) if r["raw"] else ""
     return {"url": r["url"], "status": r["status"], "content_type": r["content_type"],
             "text": text, "truncated": r["truncated"], "error": r["error"]}
 
@@ -452,7 +481,7 @@ def slugify(name: str) -> str:
     for a, b in repl.items():
         name = name.replace(a, b)
     name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
+    name = re.sub(r"[^A-Za-z0-9._]+", "_", name).strip("._-")
     name = re.sub(r"_+", "_", name)[:60].strip("_").lower()
     return name or "webseite"
 
@@ -518,18 +547,25 @@ _URL_RE = re.compile(r"url\(\s*['\"]?([^'\"\s)]+)['\"]?\s*\)", re.IGNORECASE)
 
 
 def asset_local_path(url: str) -> str | None:
-    """Zielpfad unter pages/: assets/<host>/<pfad>. Query -> Hash-Suffix."""
+    """Zielpfad unter pages/: assets/<host>/<pfad>. Query -> Hash-Suffix.
+
+    Fix: Hash wird VOR die Datei-Extension eingefuegt ('bild_q1w2.jpg' statt
+    'bild.jpg_q1w2'), damit der Dateityp anhand der Endung erkennbar bleibt
+    (Mimetype-Erkennung fuer Vorschau/Browser).
+    """
     p = urlparse(url)
     if p.scheme not in ("http", "https") or not p.hostname:
         return None
     host = re.sub(r"[^a-z0-9.-]", "_", p.hostname.lower())[:80] or "host"
     path = p.path.strip("/") or "index"
-    suffix = ""
-    if p.query:
-        suffix = "_" + hashlib.sha256(p.query.encode()).hexdigest()[:8]
     safe = re.sub(r"[^A-Za-z0-9._/-]", "_", path).strip("/_") or "index"
-    stem = safe + suffix
-    parts = [re.sub(r"_+", "_", x)[:60] or "_" for x in stem.split("/") if x not in ("", ".", "..")]
+    if p.query:
+        stem, ext = os.path.splitext(safe)
+        if ext and len(ext) <= 6:
+            safe = f"{stem}_{hashlib.sha256(p.query.encode()).hexdigest()[:8]}{ext}"
+        else:
+            safe = safe + "_" + hashlib.sha256(p.query.encode()).hexdigest()[:8]
+    parts = [re.sub(r"_+", "_", x)[:60] or "_" for x in safe.split("/") if x not in ("", ".", "..")]
     rel = "assets/" + host + "/" + "/".join(parts[-5:])
     return rel[:240]
 
@@ -574,6 +610,10 @@ def localize_page(client: httpx.Client, html: str, page_url: str, page_file: str
         soup = BeautifulSoup(html, "html.parser")
     except Exception:
         return html, 0
+    # <base>-Tags entfernen: Sie wuerden im Archiv alle relativen Asset-Pfade
+    # zur Original-Site umlenken (Offline-Kopie waere kaputt)
+    for b in soup.find_all("base"):
+        b.decompose()
     asset_map: dict[str, str] = {}
     page_dir = str(Path(page_file).parent).replace("\\", "/")
 
@@ -632,13 +672,10 @@ def localize_page(client: httpx.Client, html: str, page_url: str, page_file: str
                         if not sub_rel:
                             return m.group(0)
                         try:
-                            relpath = str(Path(sub_rel).relative_to(css_dir.relative_to(pages_dir)))
+                            relpath = os.path.relpath(str(pages_dir / sub_rel),
+                                                      str(css_dir)).replace("\\", "/")
                         except Exception:
-                            try:
-                                relpath = str(os.path.relpath(str(pages_dir / sub_rel),
-                                                             str(css_dir))).replace("\\", "/")
-                            except Exception:
-                                return m.group(0)
+                            return m.group(0)
                         return f"url({relpath})"
                     css_target.write_text(_URL_RE.sub(_css_sub, css_text), encoding="utf-8")
             except Exception:
@@ -742,6 +779,13 @@ def rewrite_internal_links(html: str, page_url: str, page_file: str,
             try:
                 a["href"] = str(Path(*prefix, local)).replace("\\", "/") if prefix \
                     else local
+            except Exception:
+                pass
+        else:
+            # Zielseite fehlt im Backup: auf die Original-URL zeigen (klickbar,
+            # solange die Website online ist) statt toter relativer Pfad
+            try:
+                a["href"] = target
             except Exception:
                 pass
     return str(soup)
@@ -886,7 +930,7 @@ def discover_site(job_id: int, start_url: str, max_pages: int, max_depth: int,
                         "title": title, "depth": depth, "source": source})
         return True
 
-    headers = {"User-Agent": "SiteBackup/1.2 (+local discovery; polite 0.2s delay)"}
+    headers = {"User-Agent": "SiteBackup/1.4 (+local discovery; polite 0.2s delay)"}
     with httpx.Client(headers=headers, timeout=REQ_TIMEOUT) as client:
         add(start_url, 0, "start")
         log_lines.append(f"Start: {start_url}")
@@ -1002,7 +1046,7 @@ def crawl_job(job_id: int, start_url: str, max_pages: int, max_depth: int, same_
         if progress:
             progress(done, total, ok, failed, total_bytes, line)
 
-    headers = {"User-Agent": "SiteBackup/1.3 (+local backup; polite 0.2s delay)"}
+    headers = {"User-Agent": "SiteBackup/1.4 (+local backup; polite 0.2s delay)"}
     with httpx.Client(headers=headers, timeout=REQ_TIMEOUT) as client:
         for i, entry in enumerate(targets, start=1):
             canon = entry["url"]
@@ -1207,6 +1251,254 @@ def make_zip(job_id: int) -> Path:
             if (dest / extra).exists():
                 zf.write(dest / extra, extra)
     return zpath
+
+
+# ---------------------------------------------------------------- Einzel-HTML-Export
+# Kern-Feature: die komplette Website als EINE portabel, selbstenthaltene
+# HTML-Datei (Bilder/CSS/Fonts als data-URI eingebettet, Navigation offline
+# klickbar). Funktioniert auf jeder Plattform, fuer immer ohne Original-Host.
+
+MIME_EXTRA = {
+    ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf",
+    ".otf": "font/otf", ".eot": "application/vnd.ms-fontobject",
+    ".svg": "image/svg+xml", ".webp": "image/webp", ".avif": "image/avif",
+    ".mp4": "video/mp4", ".webm": "video/webm", ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg", ".oga": "audio/ogg", ".m4a": "audio/mp4",
+    ".ico": "image/x-icon", ".css": "text/css", ".js": "text/javascript",
+    ".mjs": "text/javascript", ".txt": "text/plain", ".json": "application/json",
+}
+
+
+def _data_uri(path: Path) -> str | None:
+    """Datei als data-URI (base64) mit bestem bekannten Mimetype."""
+    try:
+        raw = path.read_bytes()
+    except Exception:
+        return None
+    ext = path.suffix.lower()
+    mime = MIME_EXTRA.get(ext) or mimetypes.guess_type(path.name)[0]
+    if not mime:
+        return None
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
+def _safe_pages_rel(page_dir: str, ref: str) -> str | None:
+    """Relativen Ref (von einer Seiten-/CSS-Datei aus) in einen pages-relativen
+    Pfad uebersetzen. None bei unsauber/ausserhalb (Path-Traversal-Schutz)."""
+    ref = (ref or "").strip()
+    if not ref or ref.startswith(("#", "data:", "blob:", "javascript:")):
+        return None
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", ref) and not re.match(r"^[A-Za-z]:[\\/]", ref):
+        return None  # absolute URL / Schema (mailto:, http:// …)
+    try:
+        pages_rel = os.path.normpath(os.path.join(page_dir, ref)).replace("\\", "/")
+    except Exception:
+        return None
+    if not pages_rel or pages_rel.startswith(("..", "/")) or pages_rel in (".", ""):
+        return None
+    return pages_rel
+
+
+def _css_inline(css_text: str, css_dir_rel: str, pages_dir: Path, depth: int = 0) -> str:
+    """CSS-Text vollstaendig selbstenthalten machen: alle url(...)-Refs auf
+    lokale Dateien -> data-URI (eingebettete CSS-Dateien rekursiv, Tiefe 3)."""
+    def repl(m: "re.Match") -> str:
+        ref = (m.group(1) or "").strip()
+        pages_rel = _safe_pages_rel(css_dir_rel, ref)
+        if not pages_rel:
+            return m.group(0)  # absolute URL oder data-URI bleibt
+        f = pages_dir / pages_rel
+        if not f.is_file():
+            return m.group(0)
+        if f.suffix.lower() == ".css" and depth < 3:
+            try:
+                sub = _css_inline(f.read_text(encoding="utf-8", errors="replace"),
+                                  os.path.dirname(pages_rel), pages_dir, depth + 1)
+                b64 = base64.b64encode(sub.encode("utf-8")).decode("ascii")
+                return f"url(data:text/css;base64,{b64})"
+            except Exception:
+                return m.group(0)
+        uri = _data_uri(f)
+        return f"url({uri})" if uri else m.group(0)
+    return _URL_RE.sub(repl, css_text)
+
+
+def _inline_page(html: str, page_file: str, pages_dir: Path,
+                 link_targets: dict[str, str]) -> str:
+    """Eine gesicherte Seite (Pass-2-HTML mit relativen Pfaden) in eine
+    selbstenthaltene Form bringen: Assets als data-URI, interne Links auf
+    Sprunganker (#pg-N) oder Original-URL (via link_targets: pages-relativer
+    Dateipfad -> Ziel). Gibt den BODY-Inhalt zurueck (ohne <html>/<head>)."""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return ""
+    page_dir = str(Path(page_file).parent).replace("\\", "/")
+
+    def uri_for_ref(ref: str) -> str | None:
+        pages_rel = _safe_pages_rel(page_dir, ref)
+        if not pages_rel:
+            return None
+        return _data_uri(pages_dir / pages_rel)
+
+    # 1) Stylesheets: Datei laden, innere url() inline, als data-URI einbetten
+    for tag in soup.find_all("link", href=True):
+        rel_attr = " ".join(tag.get("rel", [])).lower()
+        href = (tag.get("href") or "").strip()
+        if "stylesheet" not in rel_attr and not href.lower().endswith(".css"):
+            continue
+        pages_rel = _safe_pages_rel(page_dir, href)
+        css_uri = None
+        if pages_rel:
+            f = pages_dir / pages_rel
+            if f.is_file():
+                try:
+                    css = f.read_text(encoding="utf-8", errors="replace")
+                    css = _css_inline(css, os.path.dirname(pages_rel), pages_dir)
+                    css_uri = ("data:text/css;base64,"
+                               + base64.b64encode(css.encode("utf-8")).decode("ascii"))
+                except Exception:
+                    css_uri = None
+        if css_uri:
+            tag["href"] = css_uri
+            for a in ("integrity", "crossorigin"):
+                if tag.has_attr(a):
+                    del tag[a]
+        else:
+            tag.decompose()  # externe CSS-Datei, die nicht im Archiv liegt
+
+    # 2) Scripts: lokale JS-Dateien einbetten, fehlende verwerfen
+    for tag in soup.find_all("script", src=True):
+        uri = uri_for_ref(tag.get("src") or "")
+        if uri:
+            tag["src"] = uri
+            for a in ("integrity", "crossorigin"):
+                if tag.has_attr(a):
+                    del tag[a]
+        else:
+            tag.decompose()
+
+    # 3) img/video/audio/source/embed/track: src/poster
+    for tag_name, attrs in ASSET_ATTRS.items():
+        if tag_name in ("link", "script"):
+            continue
+        for tag in soup.find_all(tag_name):
+            for attr in attrs:
+                val = tag.get(attr)
+                if not val:
+                    continue
+                if attr == "srcset":
+                    parts = []
+                    for u, desc in split_srcset(val):
+                        uri = uri_for_ref(u)
+                        parts.append((uri or u) + desc)
+                    tag[attr] = ", ".join(parts)
+                else:
+                    uri = uri_for_ref(val)
+                    if uri:
+                        tag[attr] = uri
+
+    # 4) Inline-CSS (style-Attribute + <style>-Tags)
+    for tag in soup.find_all(style=True):
+        tag["style"] = _css_inline(tag.get("style") or "", page_dir, pages_dir)
+    for style_tag in soup.find_all("style"):
+        if style_tag.string:
+            style_tag.string.replace_with(
+                _css_inline(str(style_tag.string), page_dir, pages_dir))
+
+    # 5) <a>-Links: Sprunganker (Gesamt-Datei) oder Original-URL (Einzelseite)
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:", "data:")):
+            continue
+        pages_rel = _safe_pages_rel(page_dir, href)
+        if pages_rel and pages_rel in link_targets:
+            a["href"] = link_targets[pages_rel]
+        elif pages_rel:  # lokaler Pfad ohne Ziel (Seite fehlgeschlagen)
+            a["href"] = "#"
+            a["title"] = "Zielseite war nicht Teil des Backups"
+
+    # Nur den Body-Inhalt einbetten (kein <html>/<head>-Nesting im Gesamtdokument)
+    if soup.body is not None:
+        body_html = "".join(str(c) for c in soup.body.children)
+        body_style_tags = set(soup.body.find_all("style"))
+    else:
+        body_html = str(soup)
+        body_style_tags = set()
+    # <style>-Tags aus dem Kopf mitnehmen (sonst verliert die Seite ihr CSS)
+    head_styles = "\n".join(str(t) for t in soup.find_all("style") if t not in body_style_tags)
+    return head_styles + "\n" + body_html
+
+
+def build_single_file_html(job_id: int, start_url: str, mapping: dict[str, dict],
+                           pages_dir: Path) -> Path:
+    """Gesamte Website als EINE HTML-Datei: Inhaltsverzeichnis + alle Seiten
+    als Section (Sprunganker-Navigation offline klickbar) + alle Assets als
+    data-URI. Liegt unter data/jobs/<id>/single.html."""
+    rows = sorted(mapping.items(), key=lambda kv: (kv[1].get("nr") or 999999))
+    ok_rows = [(u, m) for u, m in rows if m.get("file")]
+    failed_rows = [(u, m) for u, m in rows if not m.get("file")]
+    # pages-relativer Dateipfad -> Sprunganker (fuer <a>-Rewrite)
+    link_targets: dict[str, str] = {}
+    for _u, m in ok_rows:
+        link_targets[os.path.normpath(m["file"]).replace("\\", "/")] = f"#pg-{m.get('nr')}"
+
+    sections: list[str] = []
+    for u, m in ok_rows:
+        fpath = pages_dir / m["file"]
+        try:
+            raw = fpath.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        body = _inline_page(raw, m["file"], pages_dir, link_targets)
+        nr = m.get("nr", "?")
+        title = htmlmod.escape(str(m.get("title") or u))
+        url = htmlmod.escape(u)
+        sections.append(
+            f'<section class="pg" id="pg-{nr}">'
+            f'<div class="pg-head"><span class="pg-nr">#{nr}</span>'
+            f'<span class="pg-title">{title}</span>'
+            f'<a class="pg-url" href="{url}" target="_blank" rel="noopener">Original öffnen ↗</a>'
+            f'</div>{body}</section>')
+
+    toc_items = []
+    for u, m in ok_rows:
+        title = htmlmod.escape(str(m.get("title") or u))
+        toc_items.append(f'<li><a href="#pg-{m.get("nr")}">{title}</a></li>')
+    failed_items = "".join(
+        f'<li><span class="pg-miss">{htmlmod.escape(str(m.get("title") or u))}</span> '
+        f'– {htmlmod.escape(u)} '
+        f'<span class="pg-note">({htmlmod.escape(str(m.get("note") or "Fehler")[:80])})</span></li>'
+        for u, m in failed_rows)
+
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+    doc = f"""<!DOCTYPE html>
+<html lang="de"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Website-Backup: {htmlmod.escape(start_url)}</title>
+<style>
+body{{font-family:system-ui,sans-serif;margin:0;color:#111;background:#f6f7f9}}
+.header{{background:#0f172a;color:#e2e8f0;padding:20px 24px}}
+.header h1{{margin:0 0 6px;font-size:20px}}.header p{{margin:0;color:#94a3b8;font-size:13px}}
+.toc{{background:#fff;border:1px solid #dde;border-radius:12px;margin:18px auto;max-width:900px;padding:16px 22px}}
+.toc h2{{font-size:15px;margin:0 0 10px}}.toc ol{{margin:0;padding-left:20px;font-size:14px;line-height:1.7}}
+.pg{{background:#fff;border:1px solid #dde;border-radius:12px;margin:18px auto;max-width:900px;padding:10px 22px 20px;overflow-wrap:break-word}}
+.pg-head{{border-bottom:2px solid #38bdf8;padding:12px 0;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}}
+.pg-nr{{color:#64748b;font-size:13px}}.pg-title{{font-weight:700;font-size:17px}}
+.pg-url{{margin-left:auto;font-size:12px;color:#0284c7}}
+.pg img,.pg video{{max-width:100%;height:auto}}
+.pg-miss{{color:#a00}}.pg-note{{color:#64748b;font-size:12px}}
+</style></head><body>
+<div class="header"><h1>📦 Website-Backup (eine Datei, offline lesbar)</h1>
+<p>{htmlmod.escape(start_url)} · {len(ok_rows)} Seiten gesichert am {now} · erstellt mit SiteBackup</p></div>
+<div class="toc"><h2>Inhaltsverzeichnis ({len(ok_rows)} Seiten)</h2><ol>{''.join(toc_items)}</ol>
+{'<h2>Nicht gesicherte Seiten (' + str(len(failed_rows)) + ')</h2><ul>' + failed_items + '</ul>' if failed_rows else ''}
+</div>
+{''.join(sections)}
+</body></html>"""
+    out = job_dir(job_id) / "single.html"
+    out.write_text(doc, encoding="utf-8")
+    return out
 
 
 # ---------------------------------------------------------------- Scheduler
@@ -1510,6 +1802,84 @@ def download_zip(job_id: int):
         raise HTTPException(500, f"ZIP konnte nicht erstellt werden: {exc}")
     return FileResponse(zpath, media_type="application/zip",
                         filename=backup_download_name(job, "zip"))
+
+
+@app.get("/api/jobs/{job_id}/download-html")
+def download_single_html(job_id: int):
+    """GESAMTE Website als EINE portabel, selbstenthaltene HTML-Datei:
+    alle Seiten als Section + Inhaltsverzeichnis + alle Assets als data-URI.
+    Offline lesbar und navigierbar, auf jeder Plattform, fuer immer."""
+    job = require_job(job_id)
+    dest = job_dir(job_id)
+    mp = dest / "mapping.json"
+    if not mp.exists():
+        raise HTTPException(404, "Noch kein Backup vorhanden – erst 'Backup starten'")
+    try:
+        mapping = json.loads(mp.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(500, f"mapping.json unlesbar: {exc}")
+    if not any(m.get("file") for m in mapping.values()):
+        raise HTTPException(404, "Keine gesicherten Seiten im Backup")
+    try:
+        out = build_single_file_html(job_id, job.start_url, mapping, dest / "pages")
+    except Exception as exc:
+        raise HTTPException(500, f"Einzel-HTML konnte nicht erstellt werden: {exc}")
+    return FileResponse(out, media_type="text/html",
+                        filename=backup_download_name(job, "html"))
+
+
+@app.get("/api/jobs/{job_id}/single-page")
+def download_single_page(job_id: int, url: str):
+    """EINE Unterseite als eine selbstenthaltene HTML-Datei (Assets als
+    data-URI). Links auf andere Seiten zeigen auf die Original-URL."""
+    require_job(job_id)
+    canon = canon_url(url)
+    mp = job_dir(job_id) / "mapping.json"
+    if not mp.exists():
+        raise HTTPException(404, "Noch kein Backup vorhanden – erst 'Backup starten'")
+    mapping = json.loads(mp.read_text(encoding="utf-8"))
+    m = mapping.get(canon)
+    if not m or not m.get("file"):
+        raise HTTPException(404, "Seite ist nicht (erfolgreich) Teil des Backups")
+    pages_dir = job_dir(job_id) / "pages"
+    try:
+        raw = (pages_dir / m["file"]).read_text(encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(500, f"Seiten-Datei unlesbar: {exc}")
+    # file -> Original-URL (interne Links klickbar, wenn online)
+    link_targets = {os.path.normpath(mm["file"]).replace("\\", "/"): u
+                    for u, mm in mapping.items() if mm.get("file") and u != canon}
+    body = _inline_page(raw, m["file"], pages_dir, link_targets)
+    title = htmlmod.escape(str(m.get("title") or canon))
+    doc = (f'<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8">'
+           f'<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+           f'<title>{title} – Website-Backup</title></head><body>{body}</body></html>')
+    out = job_dir(job_id) / f"single-page-{m.get('nr', 0)}.html"
+    out.write_text(doc, encoding="utf-8")
+    day = datetime.utcnow().date().isoformat()
+    safe_name = slugify(str(m.get("title") or "seite"))
+    return FileResponse(out, media_type="text/html",
+                        filename=f"{safe_name}_{day}.html")
+
+
+@app.get("/api/jobs/{job_id}/preview/{file_path:path}")
+def preview_file(job_id: int, file_path: str):
+    """Liefert JEDE Datei aus pages/ (HTML + assets/) fuer die In-App-Vorschau.
+
+    Da alle gesicherten Seiten relative Pfade verwenden und alles unter
+    /preview/<pfad> liegt, funktionieren Asset-Referenzen (CSS/Bilder) und
+    interne Links innerhalb der Vorschau wie im echten Archiv.
+    """
+    require_job(job_id)
+    if "\x00" in file_path:
+        raise HTTPException(400, "Ungueltiger Pfad")
+    root = (job_dir(job_id) / "pages").resolve()
+    fpath = (root / file_path).resolve()
+    if fpath != root and root not in fpath.parents:
+        raise HTTPException(400, "Ungueltiger Pfad")
+    if not fpath.is_file():
+        raise HTTPException(404, "Datei nicht gefunden")
+    return FileResponse(fpath)
 
 
 @app.get("/api/jobs/{job_id}/page")

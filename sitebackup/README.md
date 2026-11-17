@@ -10,7 +10,14 @@ Lokale Backup-App für Proxmox LXC: Ein Job = eine Start-URL. Ablauf in
    Titel-Index (`mapping.json`) und Inhaltsverzeichnis (`index.html`).
    Bilder/CSS/JS werden mitgeladen und Links umgeschrieben → **offline lesbar**.
    Download **komplett als ZIP** oder **jede Seite einzeln**.
-3. **Suche:** Titel + Text aller gesicherten Seiten per Volltextsuche (FTS5)
+3. **Einzel-HTML:** die gesamte Website als **eine einzige, selbstenthaltene
+   HTML-Datei** (`/download-html`): Assets als data-URI eingebettet (inkl.
+   eingebettetem CSS mit eigenen Unter-Assets), alle Seiten als Kapitel mit
+   klickbarem Inhaltsverzeichnis und Sprunganker-Navigation — offline lesbar
+   und für immer archivierbar, auf jeder Plattform. Optional auch **pro
+   Unterseite** (`/single-page?url=…`), dort zeigen interne Links auf die
+   Original-URL.
+4. **Suche:** Titel + Text aller gesicherten Seiten per Volltextsuche (FTS5)
    durchsuchen – Treffer öffnen die lokale Offline-Kopie.
 
 Zeitplan pro Job: **manuell · stündlich · täglich · wöchentlich · monatlich · Cron**
@@ -41,12 +48,14 @@ ausgegeben. Trace-Re-run: `bash -x install/sitebackup.sh`.
 - Daten: `/opt/sitebackup/data/jobs/<job-id>/pages/*.html` + `pages/assets/…` + `discovery.json` + `mapping.json` + `index.html` + `<job>_job-<id>_<datum>.zip`
 - Container-Shell: `pct enter <CTID>`
 
-## Bedienung
+## Bedienung (Dashboard)
 
-1. Job anlegen (oder per „Bearbeiten“ ändern): Name + Start-URL (z. B. `https://example.com`), max. Seiten (Default 100), Tiefe (Default 3).
-2. **Schritt 1 „Seiten entdecken“:** listet alle Unterseiten indexiert mit Seitennamen (Quelle: Sitemap/Link), mit Filter-Suche.
-3. **Schritt 2 „Backup starten“:** sichert jede Seite einzeln als HTML (Fortschrittsbalken + `[i/n]`-Log, alle 3 s aktualisiert). Jedes Backup startet mit frischer Discovery und räumt alte Dateien weg.
-4. Laden: **komplett als ZIP** (inkl. Index) oder **jede Unterseite einzeln** als HTML; Zeitplan für Automatik wählen (z. B. wöchentlich Montag 03:00 oder Cron `0 3 * * 1`).
+1. **Schnellweg:** URL in „🌐 Website jetzt einmal sichern“ eingeben → **⚡ Jetzt sichern**: legt einen Job (Name = Domain) an und startet das Backup sofort. Fortschritt als Balken in der Job-Karte.
+2. Alternativ **+ Neuer Job** für eigene Einstellungen (max. Seiten/Tiefe, Zeitplan, Cron).
+3. **Schritt 1 „Seiten entdecken“:** listet alle Unterseiten indexiert mit Seitennamen (Quelle: Sitemap/Link), mit Filter-Suche.
+4. **Schritt 2 „Backup starten“:** sichert jede Seite einzeln als HTML (Fortschrittsbalken + `[i/n]`-Log, alle 4 s aktualisiert). Jedes Backup startet mit frischer Discovery und räumt alte Dateien weg.
+5. Downloads pro Job: **🌐 1 HTML-Datei** (ganze Website, offline), **🗜 ZIP** (HTML + Assets + Index), **📄 Seiten** (Index mit 👁 Vorschau und ⬇ Einzelseite-als-HTML).
+6. Volltextsuche über alle Archive (FTS5).
 
 ## Sicherheit
 
@@ -76,7 +85,10 @@ ausgegeben. Trace-Re-run: `bash -x install/sitebackup.sh`.
 | `GET` | `/api/jobs/{id}/pages` | Index: Nr, Seitenname, URL, HTML-Datei |
 | `GET` | `/api/jobs/{id}/index` | Inhaltsverzeichnis als HTML |
 | `GET` | `/api/jobs/{id}/page?file=` | Einzelne HTML-Datei (Offline-Kopie) |
+| `GET` | `/api/jobs/{id}/preview/{pfad}` | Ganze Offline-Kopie (HTML **und** Assets) für die In-App-Vorschau |
 | `GET` | `/api/jobs/{id}/download` | Alles als ZIP (`<job>_job-<id>_<datum>.zip`) |
+| `GET` | `/api/jobs/{id}/download-html` | **Gesamte Website als 1 selbstenthaltene HTML-Datei** (`<job>_job-<id>_<datum>.html`) |
+| `GET` | `/api/jobs/{id}/single-page?url=` | Eine Unterseite als 1 selbstenthaltene HTML-Datei |
 | `GET` | `/api/search?q=&job_id=` | Volltextsuche (Titel + Text, BM25, mit Snippet) |
 
 Limits (per Env anpassbar): `SITEBACKUP_MAX_HTML_MB` (8), `SITEBACKUP_MAX_ASSET_MB` (10),
@@ -106,12 +118,16 @@ pct stop <CTID>; pct destroy <CTID> --purge
 
 ```bash
 pip install -r sitebackup/requirements.txt
+python -m pytest tests/ -q          # 59 Tests (ohne echtes Netzwerk)
 python -m uvicorn app:app --host 0.0.0.0 --port 8090 --app-dir sitebackup
 # UI: http://localhost:8090
+
+# Dashboard-UI bauen (Build landet in sitebackup/static/):
+cd web && npm install && npm run build
 ```
 
 ## Stack
 
 Python 3.11+ · FastAPI · SQLite (SQLAlchemy) · httpx · BeautifulSoup4 ·
-APScheduler (Cron/Wochen-/Monatspläne, reboot-sicher) · Web UI als statisches
-HTML (kein Node-Build nötig, bewusst schlank für LXC).
+APScheduler (Cron/Wochen-/Monatspläne, reboot-sicher) · Web UI: React + Vite
+(Fertig-Build committed in `static/`, kein Node im Container).
