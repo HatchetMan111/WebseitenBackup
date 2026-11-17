@@ -344,7 +344,12 @@ export default function App() {
           onRun={(j, urls) => { setDetail(null); runJob(j, urls) }} />
       )}
       {detail?.type === 'pages' && <PagesModal job={detail.job} data={detail.data} onClose={() => setDetail(null)}
-        onPreview={(file, title) => setDetail({ ...detail, type: 'preview', file, title })} />}
+        onPreview={(file, title) => setDetail({ ...detail, type: 'preview', file, title })}
+        onCode={(file, title, url) => setDetail({ ...detail, type: 'code', file, title, url })} />}
+      {detail?.type === 'code' && (
+        <CodeModal job={detail.job} file={detail.file} title={detail.title} url={detail.url}
+          onClose={() => detail.data ? setDetail({ ...detail, type: 'pages' }) : setDetail(null)} />
+      )}
       {detail?.type === 'log' && <LogModal runId={detail.runId} onClose={() => setDetail(null)} />}
       {detail?.type === 'preview' && (
         <PreviewModal job={detail.job} file={detail.file} title={detail.title}
@@ -585,7 +590,7 @@ function DiscoveryModal({ job, data, onClose, onRun }) {
 }
 
 // ---------------------------------------------------------------- Seiten-Index-Modal
-function PagesModal({ job, data, onClose, onPreview }) {
+function PagesModal({ job, data, onClose, onPreview, onCode }) {
   const [q, setQ] = useState('')
   const pages = (data?.pages || []).filter(p =>
     !q || (p.title || '').toLowerCase().includes(q.toLowerCase()) || p.url.toLowerCase().includes(q.toLowerCase()))
@@ -612,8 +617,9 @@ function PagesModal({ job, data, onClose, onPreview }) {
                   {p.file
                     ? <div className="row">
                       <button className="ghost btn-sm" onClick={() => onPreview(p.file, p.title)}>👁 Vorschau</button>
+                      <button className="ghost btn-sm" onClick={() => onCode(p.file, p.title, p.url)}>🧾 Code</button>
                       <button className="ghost btn-sm" onClick={() => dl(`/api/jobs/${job.id}/single-page?url=${encodeURIComponent(p.url)}`)}
-                        title="Diese Seite als eine selbstenthaltene HTML-Datei">⬇ HTML</button>
+                        title="Diese Seite als eine selbstenthaltene HTML-Datei herunterladen">⬇ HTML</button>
                       <span className="hint">{p.assets || 0} Assets</span>
                     </div>
                     : <span className="hint">–</span>}
@@ -623,6 +629,51 @@ function PagesModal({ job, data, onClose, onPreview }) {
           </tbody>
         </table>
       </div>
+    </Modal>
+  )
+}
+
+// ---------------------------------------------------------------- Code-Modal (Quelltext ansehen/kopieren/herunterladen)
+function CodeModal({ job, file, title, url, onClose }) {
+  const [code, setCode] = useState(null)
+  const [err, setErr] = useState('')
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    let alive = true
+    fetch(`/api/jobs/${job.id}/source?file=${encodeURIComponent(file)}`)
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text() })
+      .then(t => { if (alive) setCode(t) })
+      .catch(e => { if (alive) setErr(e.message) })
+    return () => { alive = false }
+  }, [job.id, file])
+  const copy = async () => {
+    if (!code) return
+    try {
+      await navigator.clipboard.writeText(code)
+    } catch {
+      // Fallback ohne Clipboard-API
+      const ta = document.createElement('textarea')
+      ta.value = code
+      ta.style.position = 'fixed'; ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      try { document.execCommand('copy') } catch { /* egal */ }
+      ta.remove()
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+  return (
+    <Modal title={`🧾 Quellcode: ${title || file}`} onClose={onClose} wide>
+      <div className="row" style={{ marginBottom: 8 }}>
+        <button className="ghost btn-sm" onClick={copy} disabled={!code}>{copied ? '✅ Kopiert!' : '📋 Kopieren'}</button>
+        <a className="ghost btn-like" href={`/api/jobs/${job.id}/page?file=${encodeURIComponent(file)}`} download={file}>⬇ Datei herunterladen</a>
+        {url && <a className="ghost btn-like" href={url} target="_blank" rel="noopener">Original ↗</a>}
+        <span className="hint">Gespeicherte Datei: <code>{file}</code>{code ? ` · ${(code.length / 1024).toFixed(1)} KB` : ''}</span>
+      </div>
+      {err && <div className="errtxt">Quellcode laden fehlgeschlagen: {err}</div>}
+      {!code && !err && <div className="hint">Lade …</div>}
+      {code && <pre className="code">{code}</pre>}
     </Modal>
   )
 }

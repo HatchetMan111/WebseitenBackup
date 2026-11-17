@@ -24,10 +24,23 @@ Details: [`sitebackup/README.md`](sitebackup/README.md).
 React/Vite-Dashboard (dunkles Theme): URL eingeben → **⚡ Jetzt sichern** —
 Discovery findet **alle Unterseiten** (Default „alle“, per „Max. Seiten“ auch
 begrenzbar), Backup und Fortschritt laufen automatisch; danach lassen sich
-**1 HTML-Datei**, **ZIP** oder einzelne Seiten (mit Offline-Vorschau inkl.
-Bilder) herunterladen. Im Discovery-Dialog lassen sich einzelne Seiten
-**abwählen** (nur ausgewählte Unterseiten sichern). Der Fertig-Build liegt
-committed unter `sitebackup/static/` — der Container braucht **kein Node**.
+**1 HTML-Datei**, **ZIP** oder einzelne Seiten herunterladen. Im
+Discovery-Dialog lassen sich einzelne Seiten **abwählen** (nur ausgewählte
+Unterseiten sichern). Der Fertig-Build liegt committed unter
+`sitebackup/static/` — der Container braucht **kein Node**.
+
+## Seiten ansehen & lokale Kopie nutzen (Kurzform)
+
+Pro gesicherter Seite (über „📄 Seiten“ im Job):
+
+- **👁 Vorschau** — Seite so ansehen, wie sie offline aussieht (inkl. Bilder/CSS, Links zwischen gesicherten Seiten klickbar)
+- **🧾 Code** — HTML-Quellcode ansehen, mit **📋 Kopieren** und **⬇ Datei herunterladen**
+- **⬇ HTML** — diese Seite als eine selbstenthaltene Datei (Bilder/CSS eingebettet)
+
+Die ganze Website: **🌐 1 HTML-Datei** (eine Datei, Doppelklick → offline
+lesbar auf jedem Gerät, für immer) oder **🗜 ZIP** (entpacken → `index.html`
+öffnen). Vollständige Anleitung: [`sitebackup/README.md`](sitebackup/README.md)
+→ „📖 Anleitung“.
 
 ## Installation auf Proxmox (Einzeiler)
 

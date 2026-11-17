@@ -228,6 +228,26 @@ def test_preview_serves_page_and_assets(client, job, simulated_backup, a):
     assert r2.content == asset.read_bytes()
 
 
+# ---------------------------------------------------------------- Quellcode-Ansicht
+def test_source_returns_plain_html(client, job, simulated_backup, a):
+    """Fix: Quellcode einer gesicherten Seite als Klartext ansehen."""
+    r = client.get(f"/api/jobs/{job['id']}/source", params={"file": "index.html"})
+    assert r.status_code == 200
+    assert "text/plain" in r.headers["content-type"]
+    body = r.text
+    assert body.lstrip().startswith("<!DOCTYPE html>")
+    assert 'href="kontakt.html"' in body  # gespeicherter (umgeschriebener) Zustand
+
+
+def test_source_blocks_traversal_and_non_html(client, job, simulated_backup):
+    assert client.get(f"/api/jobs/{job['id']}/source",
+                      params={"file": "../../mapping.json"}).status_code in (400, 404)
+    assert client.get(f"/api/jobs/{job['id']}/source",
+                      params={"file": "mapping.json"}).status_code == 400
+    assert client.get(f"/api/jobs/{job['id']}/source",
+                      params={"file": "gibts-nicht.html"}).status_code == 404
+
+
 # ---------------------------------------------------------------- Suche (FTS)
 def test_search_after_backup(client, job, simulated_backup):
     r = client.get("/api/search", params={"q": "Startseite"})

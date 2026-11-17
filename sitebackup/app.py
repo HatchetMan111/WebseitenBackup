@@ -1917,6 +1917,20 @@ def preview_file(job_id: int, file_path: str):
     return FileResponse(fpath)
 
 
+@app.get("/api/jobs/{job_id}/source")
+def view_source(job_id: int, file: str):
+    """HTML-Quelltext einer gesicherten Seite als Klartext (Code-Ansicht)."""
+    require_job(job_id)
+    if ("\x00" in file or ".." in file or file.startswith(("/", "\\"))
+            or not file.endswith((".html", ".htm"))):
+        raise HTTPException(400, "Ungueltiger Dateiname")
+    fpath = (job_dir(job_id) / "pages" / file).resolve()
+    root = (job_dir(job_id) / "pages").resolve()
+    if root not in fpath.parents or not fpath.is_file():
+        raise HTTPException(404, "Seite nicht gefunden")
+    return FileResponse(fpath, media_type="text/plain; charset=utf-8")
+
+
 @app.get("/api/jobs/{job_id}/page")
 def download_page(job_id: int, file: str):
     require_job(job_id)

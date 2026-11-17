@@ -54,8 +54,30 @@ ausgegeben. Trace-Re-run: `bash -x install/sitebackup.sh`.
 2. Alternativ **+ Neuer Job** für eigene Einstellungen (max. Seiten/Tiefe, Zeitplan, Cron). Default: 1000 Seiten, **0 = alle** (bis 20.000, per `SITEBACKUP_MAX_PAGES_CAP` einstellbar).
 3. **Schritt 1 „Seiten entdecken“:** listet alle Unterseiten indexiert mit Seitennamen (Quelle: Sitemap/Link), mit Filter-Suche. **Seiten-Auswahl:** alles ist vorausgewählt — einzelne Seiten abhaken, die nicht ins Archiv sollen, und dann „N ausgewählte Seiten sichern“.
 4. **Schritt 2 „Backup starten“:** sichert jede Seite einzeln als HTML (Fortschrittsbalken + `[i/n]`-Log, alle 4 s aktualisiert). Jedes Backup startet mit frischer Discovery und räumt alte Dateien weg. `/` und `/index.html` sind dieselbe Seite (kein Duplikat).
-5. Downloads pro Job: **🌐 1 HTML-Datei** (ganze Website, offline), **🗜 ZIP** (HTML + Assets + Index), **📄 Seiten** (Index mit 👁 Vorschau und ⬇ Einzelseite-als-HTML).
+5. Downloads pro Job: **🌐 1 HTML-Datei** (ganze Website, offline), **🗜 ZIP** (HTML + Assets + Index), **📄 Seiten** (Index mit 👁 Vorschau, 🧾 Code und ⬇ Einzelseite-als-HTML).
 6. Volltextsuche über alle Archive (FTS5).
+
+## 📖 Anleitung: Seiten ansehen, Code lesen, lokale Kopie nutzen
+
+**Im Dashboard** (über „📄 Seiten" in der Job-Karte, jede gesicherte Zeile hat drei Aktionen):
+
+| Was willst du? | Wie? |
+|---|---|
+| Die Seite **ansehen**, wie sie offline aussieht | **👁 Vorschau** — öffnet die gesicherte Seite in einem Fenster, inkl. Bilder/CSS; die Links zwischen den gesicherten Seiten funktionieren darin |
+| Den **HTML-Quellcode ansehen** | **🧾 Code** — zeigt den exakten Inhalt der gespeicherten Datei als Klartext |
+| Quellcode **kopieren** | 🧾 Code → **📋 Kopieren** |
+| Die gespeicherte Datei **herunterladen** | 🧾 Code → **⬇ Datei herunterladen** (die .html-Datei, exakt wie im Archiv) |
+| Eine Seite als **eine Datei mit allem** | **⬇ HTML** — selbstenthaltende Kopie dieser Seite (Bilder/CSS/Fonts eingebettet), läuft auf jedem Gerät |
+| Die **ganze Website** sichern | **🌐 1 HTML-Datei** (alles in einer Datei, mit Inhaltsverzeichnis + Klick-Navigation) oder **🗜 ZIP** (alle Seiten + Assets + Index) |
+| Im Archiv **suchen** | Such-Karte im Dashboard (Titel + Text aller gesicherten Seiten) |
+
+**Als lokale Kopie verwenden — für immer, auf jeder Plattform:**
+
+1. **Einfachster Weg (eine Datei):** „🌐 1 HTML-Datei" herunterladen. Diese eine `.html`-Datei enthält die komplette Website — Text, Bilder, CSS, Navigation. Einfach per Doppelklick im Browser öffnen: offline, auf Windows/Mac/Linux/Handy/Tablet, auch in vielen Jahren noch. Datei auf USB-Stick, Cloud oder Handy kopieren — fertig abgesichert, egal wo die Original-Website heute oder morgen gehostet ist.
+2. **Mehrdatei-Archiv:** „🗜 ZIP" herunterladen und entpacken → die enthaltene `index.html` im Browser öffnen → das Inhaltsverzeichnis verlinkt alle gesicherten Seiten, innerhalb der Seiten funktionieren Bilder/CSS/Links über die relativen Pfade (`pages/…`, `pages/assets/…`). Wichtig ist nur, dass die Ordnerstruktur zusammen bleibt.
+3. **Direkt auf dem Server:** Die Dateien liegen unter `data/jobs/<job-id>/pages/` (HTML + `assets/`), dazu `index.html` (Inhaltsverzeichnis), `single.html` (die Eine-Datei-Kopie), `mapping.json` (Titel-Index) und `discovery.json` (gefundene Seiten).
+
+Was du unter 🧾 Code siehst, ist exakt der Inhalt deiner lokalen Kopie — kein umgeleitetes Online-Laden.
 
 ## Sicherheit
 
@@ -86,6 +108,7 @@ ausgegeben. Trace-Re-run: `bash -x install/sitebackup.sh`.
 | `GET` | `/api/jobs/{id}/index` | Inhaltsverzeichnis als HTML |
 | `GET` | `/api/jobs/{id}/page?file=` | Einzelne HTML-Datei (Offline-Kopie) |
 | `GET` | `/api/jobs/{id}/preview/{pfad}` | Ganze Offline-Kopie (HTML **und** Assets) für die In-App-Vorschau |
+| `GET` | `/api/jobs/{id}/source?file=` | HTML-Quelltext einer gesicherten Seite als Klartext (Code-Ansicht) |
 | `GET` | `/api/jobs/{id}/download` | Alles als ZIP (`<job>_job-<id>_<datum>.zip`) |
 | `GET` | `/api/jobs/{id}/download-html` | **Gesamte Website als 1 selbstenthaltene HTML-Datei** (`<job>_job-<id>_<datum>.html`) |
 | `GET` | `/api/jobs/{id}/single-page?url=` | Eine Unterseite als 1 selbstenthaltene HTML-Datei |
