@@ -50,10 +50,10 @@ ausgegeben. Trace-Re-run: `bash -x install/sitebackup.sh`.
 
 ## Bedienung (Dashboard)
 
-1. **Schnellweg:** URL in „🌐 Website jetzt einmal sichern“ eingeben → **⚡ Jetzt sichern**: legt einen Job (Name = Domain) an und startet das Backup sofort. Fortschritt als Balken in der Job-Karte.
-2. Alternativ **+ Neuer Job** für eigene Einstellungen (max. Seiten/Tiefe, Zeitplan, Cron).
-3. **Schritt 1 „Seiten entdecken“:** listet alle Unterseiten indexiert mit Seitennamen (Quelle: Sitemap/Link), mit Filter-Suche.
-4. **Schritt 2 „Backup starten“:** sichert jede Seite einzeln als HTML (Fortschrittsbalken + `[i/n]`-Log, alle 4 s aktualisiert). Jedes Backup startet mit frischer Discovery und räumt alte Dateien weg.
+1. **Schnellweg:** URL in „🚀 Website sichern“ eingeben → **⚡ Jetzt sichern**: legt einen Job (Name = Domain) an und startet das Backup sofort — mit **max. Seiten = 0 = alle Unterseiten finden**. Fortschritt als Balken in der Job-Karte.
+2. Alternativ **+ Neuer Job** für eigene Einstellungen (max. Seiten/Tiefe, Zeitplan, Cron). Default: 1000 Seiten, **0 = alle** (bis 20.000, per `SITEBACKUP_MAX_PAGES_CAP` einstellbar).
+3. **Schritt 1 „Seiten entdecken“:** listet alle Unterseiten indexiert mit Seitennamen (Quelle: Sitemap/Link), mit Filter-Suche. **Seiten-Auswahl:** alles ist vorausgewählt — einzelne Seiten abhaken, die nicht ins Archiv sollen, und dann „N ausgewählte Seiten sichern“.
+4. **Schritt 2 „Backup starten“:** sichert jede Seite einzeln als HTML (Fortschrittsbalken + `[i/n]`-Log, alle 4 s aktualisiert). Jedes Backup startet mit frischer Discovery und räumt alte Dateien weg. `/` und `/index.html` sind dieselbe Seite (kein Duplikat).
 5. Downloads pro Job: **🌐 1 HTML-Datei** (ganze Website, offline), **🗜 ZIP** (HTML + Assets + Index), **📄 Seiten** (Index mit 👁 Vorschau und ⬇ Einzelseite-als-HTML).
 6. Volltextsuche über alle Archive (FTS5).
 
@@ -79,7 +79,7 @@ ausgegeben. Trace-Re-run: `bash -x install/sitebackup.sh`.
 | `PUT/DELETE` | `/api/jobs/{id}` | Job ändern / löschen |
 | `POST` | `/api/jobs/{id}/discover` | Phase 1: Unterseiten entdecken (indexierte Liste) |
 | `GET` | `/api/jobs/{id}/discover` | Gespeicherte Discovery-Liste |
-| `POST` | `/api/jobs/{id}/run` | Phase 2: Sofort-Backup Seite für Seite |
+| `POST` | `/api/jobs/{id}/run` | Phase 2: Sofort-Backup aller Seiten — oder nur ausgewählter, mit Body `{"urls": ["https://…", …]}` |
 | `GET` | `/api/runs?job_id=` | Läufe + Status |
 | `GET` | `/api/runs/{id}` | Run inkl. Live-Log (`[i/n]`-Fortschritt) |
 | `GET` | `/api/jobs/{id}/pages` | Index: Nr, Seitenname, URL, HTML-Datei |
@@ -92,7 +92,9 @@ ausgegeben. Trace-Re-run: `bash -x install/sitebackup.sh`.
 | `GET` | `/api/search?q=&job_id=` | Volltextsuche (Titel + Text, BM25, mit Snippet) |
 
 Limits (per Env anpassbar): `SITEBACKUP_MAX_HTML_MB` (8), `SITEBACKUP_MAX_ASSET_MB` (10),
-`SITEBACKUP_MAX_ASSETS_MB` (500 gesamt/Job), `SITEBACKUP_MAX_ASSETS` (2000).
+`SITEBACKUP_MAX_ASSETS_MB` (500 gesamt/Job), `SITEBACKUP_MAX_ASSETS` (2000),
+`SITEBACKUP_MAX_PAGES_CAP` (20000, gilt wenn max_pages = 0), `SITEBACKUP_DELAY` (0.2 s
+Höflichkeits-Pause zwischen Anfragen).
 
 ## Update
 

@@ -10,6 +10,7 @@ _TMP = tempfile.mkdtemp(prefix="sitebackup-test-")
 os.environ["SITEBACKUP_DATA_DIR"] = _TMP
 os.environ["SITEBACKUP_ALLOW_PRIVATE"] = "1"
 os.environ["SITEBACKUP_PASSWORD"] = ""  # kein Passwort in Tests
+os.environ["SITEBACKUP_DELAY"] = "0"    # Hoeflichkeits-Pause in Tests aus
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "sitebackup"))
 

@@ -15,10 +15,13 @@ function useToasts() {
 }
 
 function Toasts({ toasts, remove }) {
+  const icon = { ok: '✅', err: '⚠️', info: 'ℹ️' }
   return (
     <div className="toasts">
       {toasts.map(t => (
-        <div key={t.id} className={`toast ${t.kind}`} onClick={() => remove(t.id)}>{t.msg}</div>
+        <div key={t.id} className={`toast ${t.kind}`} onClick={() => remove(t.id)}>
+          <span className="t-ico">{icon[t.kind] || ''}</span>{t.msg}
+        </div>
       ))}
     </div>
   )
@@ -119,8 +122,10 @@ export default function App() {
     if (d) setDetail({ type: 'discovery', job, data: d })
   }
 
-  const runJob = async (job) => {
-    await act(() => post(`/api/jobs/${job.id}/run`), 'Backup gestartet – Fortschritt in den Job-Karten')
+  const runJob = async (job, urls) => {
+    const n = urls ? ` (${urls.length} ausgewählte Seiten)` : ' (alle gefundenen Seiten)'
+    await act(() => post(`/api/jobs/${job.id}/run`, urls ? { urls } : undefined),
+      `Backup gestartet${n} – Fortschritt siehst du live in der Job-Karte`)
   }
 
   const delJob = async (job) => {
@@ -136,10 +141,10 @@ export default function App() {
     setQuickBusy(true)
     try {
       let name = domainOf(url) || 'Webseite'
-      const job = await post('/api/jobs', { name, start_url: url, schedule: 'manual' })
+      const job = await post('/api/jobs', { name, start_url: url, schedule: 'manual', max_pages: 0 })
       await post(`/api/jobs/${job.id}/run`)
       setQuickUrl('')
-      push(`🎉 Backup von ${name} gestartet! Wenn es fertig ist, kannst du die komplette Website als eine HTML-Datei herunterladen.`, 'ok')
+      push(`🎉 Los geht's! Wir suchen jetzt alle Unterseiten von ${name}. Danach kannst du die komplette Website als eine einzige HTML-Datei herunterladen.`, 'ok')
       await load()
     } catch (err) {
       push('Start fehlgeschlagen: ' + err.message, 'err')
@@ -206,34 +211,36 @@ export default function App() {
         {/* Statistik */}
         {stats && (
           <div className="stats">
-            <div className="stat"><b>{jobs.length}</b><span>Backup-Jobs</span></div>
-            <div className="stat"><b>{stats.totalPages}</b><span>Seiten gesichert</span></div>
-            <div className="stat"><b>{mb(stats.totalBytes)}</b><span>Archiv-Größe</span></div>
+            <div className="stat"><b><span className="ico">📦</span>{jobs.length}</b><span>Backup-Jobs</span></div>
+            <div className="stat"><b><span className="ico">📄</span>{stats.totalPages}</b><span>Seiten gesichert</span></div>
+            <div className="stat"><b><span className="ico">💾</span>{mb(stats.totalBytes)}</b><span>Archiv-Größe</span></div>
             <div className="stat">
-              <b className={stats.running ? 'spin' : ''}>{stats.running ? '⏳' : '🗂'}</b>
-              <span>{stats.running ? 'Backup läuft …' : stats.next ? 'nächster: ' + fmtDateTime(stats.next) : 'keine Termine'}</span>
+              <b className={stats.running ? 'spin' : ''}><span className="ico">{stats.running ? '⏳' : '⏰'}</span>
+                {stats.running ? 'läuft …' : stats.next ? fmtDateTime(stats.next) : 'keine Termine'}</b>
+              <span>{stats.running ? 'Backup läuft gerade' : 'nächster geplanter Lauf'}</span>
             </div>
           </div>
         )}
 
         {/* Schnell-Backup: der 1-Klick-Flow */}
         <section className="card highlight">
-          <h2>🌐 Website jetzt einmal sichern</h2>
-          <p className="hint">URL eingeben, fertig: Es wird automatisch eine Discovery gemacht (robots.txt + Sitemap + Links),
-            jede Unterseite als HTML gesichert — und danach kannst du <b>die komplette Website als eine einzige HTML-Datei</b> herunterladen
-            (Bilder/CSS/Fonts eingebettet, offline lesbar und navigierbar — auf jeder Plattform, für immer).</p>
+          <h2>🚀 Website sichern — in unter einer Minute</h2>
+          <p className="hint">Gib einfach die Adresse ein. Wir finden automatisch <b>alle Unterseiten</b> (über
+            robots.txt, Sitemap und Links) und sichern jede Seite als HTML mit Bildern und CSS.
+            Danach lädst du die <b>ganze Website als eine einzige HTML-Datei</b> herunter — offline lesbar,
+            auf jedem Gerät, für immer. Eigene oder fremde Website, beides geht.</p>
           <form onSubmit={quickStart} className="row">
             <input
               className="grow"
-              placeholder="https://deine-webseite.de"
+              placeholder="z. B. meine-webseite.de"
               value={quickUrl}
               onChange={e => setQuickUrl(e.target.value)}
               inputMode="url"
               autoFocus
             />
-            <button disabled={quickBusy || !quickUrl.trim()}>{quickBusy ? 'Startet …' : '⚡ Jetzt sichern'}</button>
+            <button className="btn-lg" disabled={quickBusy || !quickUrl.trim()}>{quickBusy ? '⏳ Startet …' : '⚡ Jetzt sichern'}</button>
           </form>
-          <div className="hint" style={{ marginTop: 6 }}>Der Job heißt wie die Domain und wird sofort gestartet — Fortschritt unten bei den Jobs.</div>
+          <div className="hint" style={{ marginTop: 6 }}>Kostenlos &amp; lokal: Nichts verlässt deinen Server. Der Job heißt wie die Domain — Fortschritt siehst du gleich unten.</div>
         </section>
 
         {/* Jobs */}
@@ -244,7 +251,10 @@ export default function App() {
           </div>
           {jobs === null && <div className="hint">Lade …</div>}
           {jobs && jobs.length === 0 && (
-            <div className="empty">Noch keine Jobs. Oben eine URL eingeben — oder einen eigenen Job mit Zeitplan anlegen.</div>
+            <div className="empty"><span className="big">📦</span>
+              <b>Noch keine Backups.</b><br />
+              Gib oben einfach eine URL ein — oder lege unten einen eigenen Job mit Zeitplan an.
+            </div>
           )}
           {jobs && jobs.length > 0 && (
             <div className="jobgrid">
@@ -331,7 +341,7 @@ export default function App() {
         onSaved={msg => { setEditJob(null); push(msg, 'ok'); load() }} push={push} />}
       {detail?.type === 'discovery' && (
         <DiscoveryModal job={detail.job} data={detail.data} onClose={() => setDetail(null)}
-          onRun={j => { setDetail(null); runJob(j) }} />
+          onRun={(j, urls) => { setDetail(null); runJob(j, urls) }} />
       )}
       {detail?.type === 'pages' && <PagesModal job={detail.job} data={detail.data} onClose={() => setDetail(null)}
         onPreview={(file, title) => setDetail({ ...detail, type: 'preview', file, title })} />}
@@ -368,14 +378,14 @@ function JobCard({ job, run, onDiscover, onRun, onPages, onEdit, onDelete, push 
       <a className="job-url" href={job.start_url} target="_blank" rel="noopener">{job.start_url}</a>
       <div className="pills">
         {job.discovered != null
-          ? <Pill kind="ok">Discovery: {job.discovered} Seiten</Pill>
-          : <Pill>Discovery: –</Pill>}
+          ? <Pill kind="ok">🔍 {job.discovered} Seiten gefunden</Pill>
+          : <Pill>🔍 Discovery: noch offen</Pill>}
         {job.last_run
           ? <Pill kind={job.last_run.status === 'ok' ? 'ok' : job.last_run.status === 'running' ? 'run' : 'err'}>
-            Backup {job.last_run.status}: {job.last_run.pages_ok} Seiten · {kb(job.last_run.total_bytes)}
+            {job.last_run.status === 'ok' ? '✅' : job.last_run.status === 'running' ? '⏳' : '❌'} Backup {job.last_run.status}: {job.last_run.pages_ok} Seiten · {kb(job.last_run.total_bytes)}
           </Pill>
-          : <Pill>Backup: –</Pill>}
-        <Pill kind="plan">{planTxt(job)}{job.next_run ? ` · nächster: ${fmtDateTime(job.next_run)}` : ''}</Pill>
+          : <Pill>💤 noch nie gesichert</Pill>}
+        <Pill kind="plan">🔁 {planTxt(job)}{job.next_run ? ` · nächste: ${fmtDateTime(job.next_run)}` : ''}</Pill>
       </div>
       {busy && progress && progress.total > 0 && (
         <Bar done={progress.done} total={progress.total} />
@@ -442,10 +452,12 @@ function JobFormModal({ job, onClose, onSaved, push }) {
             <input value={f.start_url} onChange={e => set('start_url', e.target.value)} placeholder="https://example.com" required />
           </label>
           <label>Max. Seiten
-            <input type="number" min="1" max="5000" value={f.max_pages} onChange={e => set('max_pages', +e.target.value)} />
+            <input type="number" min="0" max="20000" value={f.max_pages} onChange={e => set('max_pages', +e.target.value)} />
+            <span className="hint">0 = alle Unterseiten finden (empfohlen)</span>
           </label>
           <label>Max. Tiefe
             <input type="number" min="0" max="10" value={f.max_depth} onChange={e => set('max_depth', +e.target.value)} />
+            <span className="hint">Wie tief Links verfolgt werden — 3 reicht meist</span>
           </label>
           <label>Nur eigene Domain?
             <select value={f.same_domain ? '1' : '0'} onChange={e => set('same_domain', e.target.value === '1')}>
@@ -503,35 +515,71 @@ function JobFormModal({ job, onClose, onSaved, push }) {
   )
 }
 
-// ---------------------------------------------------------------- Discovery-Modal
+// ---------------------------------------------------------------- Discovery-Modal (mit Seitenauswahl)
 function DiscoveryModal({ job, data, onClose, onRun }) {
+  const allPages = data.pages || []
   const [q, setQ] = useState('')
-  const pages = (data.pages || []).filter(p =>
+  // Vorauswahl: alles — der User kann abwaehlen, was nicht gebraucht wird
+  const [sel, setSel] = useState(() => new Set(allPages.map(p => p.url)))
+  const filtered = allPages.filter(p =>
     !q || (p.title || '').toLowerCase().includes(q.toLowerCase()) || p.url.toLowerCase().includes(q.toLowerCase()))
   const src = { sitemap: 0, link: 0, start: 0 }
-  ;(data.pages || []).forEach(p => { if (src[p.source] != null) src[p.source]++ })
+  allPages.forEach(p => { if (src[p.source] != null) src[p.source]++ })
+  const toggle = url => setSel(s => {
+    const n = new Set(s)
+    if (n.has(url)) n.delete(url); else n.add(url)
+    return n
+  })
+  const toggleAll = () => setSel(s =>
+    s.size === allPages.length ? new Set() : new Set(allPages.map(p => p.url)))
+  const allChecked = allPages.length > 0 && sel.size === allPages.length
   return (
-    <Modal title={`Discovery: ${data.count} Unterseiten gefunden`} onClose={onClose} wide>
-      <div className="row">
-        <button onClick={() => onRun(job)}>2. Alle {data.count} Seiten jetzt sichern</button>
-        <span className="hint">{src.sitemap} aus Sitemap · {src.link} via Links · {src.start} Startseite</span>
-        <input className="grow" placeholder="Filtern (Titel oder URL) …" value={q} onChange={e => setQ(e.target.value)} />
-      </div>
-      <div className="twrap">
-        <table>
-          <thead><tr><th>Nr</th><th>Seitenname</th><th>URL</th><th>Quelle</th></tr></thead>
-          <tbody>
-            {pages.map(p => (
-              <tr key={p.nr}>
-                <td>{p.nr}</td>
-                <td><b>{p.title || '(ohne Titel)'}</b></td>
-                <td className="urltd"><a href={p.url} target="_blank" rel="noopener">{p.url}</a></td>
-                <td><Pill kind={'src-' + p.source}>{p.source}</Pill></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+    <Modal title={`🎉 ${data.count} Unterseiten gefunden`} onClose={onClose} wide>
+      <p className="hint">Alles ist vorab ausgewählt — hake ab, was <b>nicht</b> gesichert werden soll.
+        Nicht ausgewählte Seiten landen nicht im Archiv (die Startseite immer).</p>
+      {allPages.length === 0 ? (
+        <div className="empty"><span className="big">🤷</span>
+          Keine Unterseiten gefunden — vermutlich besteht die Website nur aus dieser einen Seite.
+          Du kannst sie direkt sichern.</div>
+      ) : (
+        <>
+          <div className="row" style={{ margin: '10px 0' }}>
+            <button className="btn-lg" disabled={sel.size === 0} onClick={() => onRun(job, [...sel])}>
+              💾 {sel.size === allPages.length ? `Alle ${sel.size} Seiten jetzt sichern` : `${sel.size} ausgewählte Seiten sichern`}
+            </button>
+            <input className="grow" placeholder="🔍 Filtern (Titel oder URL) …" value={q} onChange={e => setQ(e.target.value)} />
+          </div>
+          <div className="twrap">
+            <table>
+              <thead><tr>
+                <th style={{ width: 36 }}><input type="checkbox" checked={allChecked} onChange={toggleAll} aria-label="Alle Seiten auswählen" /></th>
+                <th>Nr</th><th>Seitenname</th><th>URL</th><th>Quelle</th>
+              </tr></thead>
+              <tbody>
+                {filtered.map(p => (
+                  <tr key={p.nr}>
+                    <td><input type="checkbox" checked={sel.has(p.url)} onChange={() => toggle(p.url)}
+                      aria-label={`${p.title || p.url} auswählen`} /></td>
+                    <td>{p.nr}</td>
+                    <td><b>{p.title || '(ohne Titel)'}</b></td>
+                    <td className="urltd"><a href={p.url} target="_blank" rel="noopener">{p.url}</a></td>
+                    <td><Pill kind={'src-' + p.source}>{p.source}</Pill></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {filtered.length === 0 && <div className="empty"><span className="big">🔍</span>Keine Treffer für „{q}“.</div>}
+          <div className="hint" style={{ marginTop: 8 }}>
+            {sel.size} von {allPages.length} ausgewählt · {src.sitemap} aus Sitemap · {src.link} über Links · {src.start} Startseite
+          </div>
+        </>
+      )}
+      {allPages.length === 0 && (
+        <div className="row" style={{ marginTop: 10 }}>
+          <button onClick={() => onRun(job)}>💾 Jetzt sichern</button>
+        </div>
+      )}
     </Modal>
   )
 }

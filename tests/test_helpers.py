@@ -22,6 +22,13 @@ def test_canon_url_default_port_dropped(a):
     assert a.canon_url("https://example.com:443/") == "https://example.com/"
 
 
+def test_canon_url_root_index_dedup(a):
+    """Fix: /index.html ist dieselbe Seite wie / (kein Duplikat-Backup)."""
+    assert a.canon_url("https://example.com/index.html") == "https://example.com/"
+    assert a.canon_url("https://example.com/index.htm") == "https://example.com/"
+    assert a.canon_url("https://example.com/") == a.canon_url("https://example.com/index.html")
+
+
 def test_canon_url_custom_port_kept(a):
     assert a.canon_url("http://example.com:8080/x") == "http://example.com:8080/x"
 

@@ -264,3 +264,62 @@ def test_discover_error_502(client, job, monkeypatch, a):
     monkeypatch.setattr(a, "discover_site", boom)
     r = client.post(f"/api/jobs/{job['id']}/discover")
     assert r.status_code == 502 and "RuntimeError" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------- Auswahl-Backup (nur gewaehlte Seiten)
+def test_run_with_selected_urls(client, job, monkeypatch, a):
+    """POST /run mit {"urls": [...]} sichert nur die ausgewaehlten Seiten."""
+    monkeypatch.setattr(a, "fetch_page", fake_fetch_page_factory())
+    monkeypatch.setattr(a, "fetch_raw", fake_fetch_raw_factory())
+    monkeypatch.setattr(a, "fetch_robots_sitemaps", lambda c, u: ([], []))
+    r = client.post(f"/api/jobs/{job['id']}/run",
+                    json={"urls": ["https://example.com/kontakt"]})
+    assert r.status_code == 200 and r.json()["selected"] == 1
+    import time
+    for _ in range(50):
+        runs = client.get("/api/runs", params={"job_id": job["id"]}).json()
+        if runs and runs[0]["status"] in ("ok", "error"):
+            break
+        time.sleep(0.1)
+    run = runs[0]
+    assert run["status"] == "ok", run["error"]
+    assert run["pages_ok"] == 1
+    mapping = json.loads((a.job_dir(job["id"]) / "mapping.json").read_text(encoding="utf-8"))
+    assert list(mapping.keys()) == ["https://example.com/kontakt"]
+    assert (a.job_dir(job["id"]) / "pages" / "kontakt.html").is_file()
+    assert not (a.job_dir(job["id"]) / "pages" / "index.html").exists()
+
+
+# ---------------------------------------------------------------- max_pages=0 = alle
+def test_max_pages_zero_means_all(client, monkeypatch, a):
+    """Fix: 0 bedeutet 'alle Seiten finden' (statt 100er-Deckel)."""
+    r = client.post("/api/jobs", json={
+        "name": "Alle", "start_url": "https://example.com/",
+        "max_pages": 0, "max_depth": 2, "same_domain": True, "schedule": "manual"})
+    assert r.status_code == 200, r.text
+    assert r.json()["max_pages"] == 0
+    monkeypatch.setattr(a, "fetch_page", fake_fetch_page_factory())
+    monkeypatch.setattr(a, "fetch_raw", fake_fetch_raw_factory())
+    monkeypatch.setattr(a, "fetch_robots_sitemaps", lambda c, u: ([], []))
+    r = client.post(f"/api/jobs/{r.json()['id']}/run")
+    assert r.status_code == 200
+    import time
+    for _ in range(50):
+        runs = client.get("/api/runs", params={"job_id": r.json()["job_id"]}).json()
+        if runs and runs[0]["status"] in ("ok", "error"):
+            break
+        time.sleep(0.1)
+    assert runs[0]["status"] == "ok" and runs[0]["pages_ok"] == 2
+
+
+def test_max_pages_above_cap_rejected(client):
+    r = client.post("/api/jobs", json={"name": "X", "start_url": "https://e.example/",
+                                       "max_pages": 50000, "schedule": "manual"})
+    assert r.status_code == 422  # pydantic-Limit (Cap 20000)
+
+
+def test_default_max_pages_is_1000(client):
+    r = client.post("/api/jobs", json={"name": "Default", "start_url": "https://e.example/",
+                                       "schedule": "manual"})
+    assert r.status_code == 200
+    assert r.json()["max_pages"] == 1000

@@ -67,6 +67,10 @@ MAX_HTML_BYTES = int(os.getenv("SITEBACKUP_MAX_HTML_MB", "8")) * 1024 * 1024
 MAX_SITEMAP_BYTES = 5 * 1024 * 1024
 MAX_SITEMAP_FILES = 25
 MAX_SITEMAP_URLS_PER_FILE = 20000
+# max_pages=0 bedeutet "alle Unterseiten finden" – hartes Sicherheits-Cap:
+MAX_PAGES_CAP = int(os.getenv("SITEBACKUP_MAX_PAGES_CAP", "20000"))
+# Hoeflichkeits-Pause zwischen Anfragen an denselben Host (Sekunden)
+FETCH_DELAY = float(os.getenv("SITEBACKUP_DELAY", "0.2"))
 # Asset-Limits (Offline-Kopie): pro Datei, gesamt pro Job, Anzahl
 MAX_ASSET_BYTES = int(os.getenv("SITEBACKUP_MAX_ASSET_MB", "10")) * 1024 * 1024
 MAX_ASSETS_BYTES = int(os.getenv("SITEBACKUP_MAX_ASSETS_MB", "500")) * 1024 * 1024
@@ -87,7 +91,7 @@ class Job(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     start_url: Mapped[str] = mapped_column(String(2000))
-    max_pages: Mapped[int] = mapped_column(Integer, default=100)
+    max_pages: Mapped[int] = mapped_column(Integer, default=1000)  # 0 = alle (bis Cap)
     max_depth: Mapped[int] = mapped_column(Integer, default=3)
     same_domain: Mapped[bool] = mapped_column(Boolean, default=True)
     schedule: Mapped[str] = mapped_column(String(20), default="manual")  # manual|hourly|daily|weekly|monthly|cron
@@ -241,7 +245,7 @@ WEEKDAYS = {"mon": "mon", "tue": "tue", "wed": "wed", "thu": "thu", "fri": "fri"
 class JobIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     start_url: str = Field(min_length=8, max_length=2000)
-    max_pages: int = Field(default=100, ge=1, le=5000)
+    max_pages: int = Field(default=1000, ge=0, le=20000)  # 0 = alle (bis Cap)
     max_depth: int = Field(default=3, ge=0, le=10)
     same_domain: bool = True
     schedule: str = "weekly"
@@ -326,7 +330,8 @@ def serialize_run(r: Run) -> dict:
 
 def canon_url(u: str) -> str:
     """/a und /a/ sowie Gross-/Kleinschreibung im Host vereinheitlichen,
-    damit dieselbe Seite nicht doppelt gesichert wird."""
+    damit dieselbe Seite nicht doppelt gesichert wird. Auch /index.html
+    wird auf / gemappt (dieselbe Startseite)."""
     u, _ = urldefrag(u.strip())
     p = urlparse(u)
     host = (p.hostname or "").lower()
@@ -334,6 +339,8 @@ def canon_url(u: str) -> str:
     if port and port not in (80, 443):
         host = f"{host}:{port}"
     path = p.path.rstrip("/") or "/"
+    if path == "/index.html" or path == "/index.htm":
+        path = "/"
     return urlunparse((p.scheme.lower(), host, path, "", p.query, ""))
 
 
@@ -920,10 +927,12 @@ def discover_site(job_id: int, start_url: str, max_pages: int, max_depth: int,
     log_lines: list[str] = []
     ordered: list[dict] = []
     seen: set[str] = set()
+    # max_pages=0 => alle Unterseiten finden (hartes Cap gegen Ausufern)
+    limit = max_pages if max_pages and max_pages > 0 else MAX_PAGES_CAP
 
     def add(url: str, depth: int, source: str, title: str = ""):
         canon = canon_url(url)
-        if canon in seen or len(ordered) >= max_pages:
+        if canon in seen or len(ordered) >= limit:
             return False
         seen.add(canon)
         ordered.append({"nr": len(ordered) + 1, "url": canon,
@@ -947,19 +956,21 @@ def discover_site(job_id: int, start_url: str, max_pages: int, max_depth: int,
             if urls:
                 log_lines.append(f"Sitemap {sm}: {len(urls)} URLs")
             for u in urls:
-                if len(ordered) >= max_pages:
+                if len(ordered) >= limit:
                     break
                 if add(u, 0, "sitemap"):
                     sm_found.append(u)
         # BFS-Link-Crawl fuer alles, was nicht in der Sitemap steht
         queue: deque[tuple[str, int]] = deque([(canon_url(start_url), 0)])
         visited_fetch: set[str] = set()
-        while queue and len(ordered) < max_pages:
+        while queue and len(ordered) < limit:
             url, depth = queue.popleft()
             canon = canon_url(url)
             if canon in visited_fetch:
                 continue
             visited_fetch.add(canon)
+            if FETCH_DELAY:
+                time.sleep(FETCH_DELAY)
             page = fetch_page(client, canon)
             if page["error"]:
                 log_lines.append(f"Discovery-Fehler {canon}: {page['error']}")
@@ -980,11 +991,13 @@ def discover_site(job_id: int, start_url: str, max_pages: int, max_depth: int,
                         continue
                     if add(lcanon, depth + 1, "link"):
                         queue.append((lcanon, depth + 1))
-                    if len(ordered) >= max_pages:
+                    if len(ordered) >= limit:
                         break
         # Titel nachladen fuer Sitemap-URLs, die der BFS-Lauf nicht besucht hat
         for e in ordered:
-            if not e["title"] and len(visited_fetch) < max_pages:
+            if not e["title"] and len(visited_fetch) < limit:
+                if FETCH_DELAY:
+                    time.sleep(FETCH_DELAY)
                 page = fetch_page(client, e["url"])
                 if page["status"] == 200 and "html" in page["content_type"].lower():
                     e["title"] = extract_title(page["text"], e["url"])
@@ -1011,13 +1024,15 @@ def load_discovery(job_id: int) -> dict | None:
     except Exception:
         return None
 def crawl_job(job_id: int, start_url: str, max_pages: int, max_depth: int, same_domain: bool,
-              progress=None) -> dict:
+              progress=None, only_urls: set[str] | None = None) -> dict:
     """PHASE 2 – Unterseite fuer Unterseite als HTML-Datei sichern.
 
     Erstellt zuerst IMMER eine frische Discovery (neue Seiten im Zeitplan
     werden so automatisch erfasst), leert dann das pages-Verzeichnis (keine
     Altlasten im ZIP) und sichert jede Seite einzeln inkl. Assets
     (Offline-Kopie) und Volltext-Index.
+    `only_urls`: optionale Auswahl kanonischer URLs (Seiten-Auswahl in der UI)
+    – dann wird nur dieser Teil der Discovery gesichert.
     `progress(done, total, ok, failed, bytes, line)` nach jeder Seite.
     Mapping-Eintrag pro URL: {nr, title, page_name, file, status, bytes, assets}.
     Schreibt mapping.json + last.log + index.html (Inhaltsverzeichnis).
@@ -1025,7 +1040,9 @@ def crawl_job(job_id: int, start_url: str, max_pages: int, max_depth: int, same_
     dest = job_dir(job_id)
     pages_dir = dest / "pages"
     disc = discover_site(job_id, start_url, max_pages, max_depth, same_domain)
-    targets = [p for p in disc["pages"]][:max_pages]
+    limit = max_pages if max_pages and max_pages > 0 else MAX_PAGES_CAP
+    targets = [p for p in disc["pages"]
+               if only_urls is None or p["url"] in only_urls][:limit]
     total = len(targets)
     # Altlasten entfernen (Seiten, die es nicht mehr gibt, duerfen nicht im ZIP bleiben)
     for old in pages_dir.rglob("*"):
@@ -1047,10 +1064,15 @@ def crawl_job(job_id: int, start_url: str, max_pages: int, max_depth: int, same_
             progress(done, total, ok, failed, total_bytes, line)
 
     headers = {"User-Agent": "SiteBackup/1.4 (+local backup; polite 0.2s delay)"}
+    if only_urls:
+        log_lines.append(f"Auswahl-Backup: {total} der {disc['count']} entdeckten Seiten "
+                         f"(Benutzerauswahl)")
     with httpx.Client(headers=headers, timeout=REQ_TIMEOUT) as client:
         for i, entry in enumerate(targets, start=1):
             canon = entry["url"]
             title = entry.get("title") or extract_title("", canon)
+            if FETCH_DELAY and i > 1:
+                time.sleep(FETCH_DELAY)
             page = fetch_page(client, canon)
             if page["error"]:
                 line = f"[{i}/{total}] FEHLER {title} <{canon}> -> {page['error']}"
@@ -1185,9 +1207,10 @@ th{{background:#f0f0f0}}.miss{{color:#a00}}</style></head><body>
     return idx
 
 
-def run_job_sync(job_id: int) -> int:
+def run_job_sync(job_id: int, only_urls: set[str] | None = None) -> int:
     """Einen Job jetzt ausfuehren (synchron). Gibt run_id zurueck.
 
+    `only_urls`: optionale Auswahl kanonischer URLs (Seiten-Auswahl in der UI).
     Schreibt den Fortschritt nach jeder Unterseite in die DB (Live-Polling),
     erstellt am Ende ZIP + Index.
     """
@@ -1216,7 +1239,8 @@ def run_job_sync(job_id: int) -> int:
                 r.pages_ok, r.pages_failed, r.total_bytes = n_ok, n_failed, n_bytes
                 db.commit()
 
-        res = crawl_job(job_id, start_url, max_pages, max_depth, same_domain, progress=progress)
+        res = crawl_job(job_id, start_url, max_pages, max_depth, same_domain,
+                        progress=progress, only_urls=only_urls)
         ok, failed, total, log = res["ok"], res["failed"], res["bytes"], res["log"]
     except Exception as exc:
         status = "error"
@@ -1531,7 +1555,7 @@ def _trigger_for_job(j: Job):
     return None
 
 
-def _scheduled_run(job_id: int):
+def _scheduled_run(job_id: int, only_urls: set[str] | None = None):
     if not _run_lock.acquire(blocking=False):
         with Session(engine) as db:
             db.add(Run(job_id=job_id, status="error", finished_at=datetime.utcnow(),
@@ -1539,7 +1563,7 @@ def _scheduled_run(job_id: int):
             db.commit()
         return
     try:
-        run_job_sync(job_id)
+        run_job_sync(job_id, only_urls)
     except Exception as exc:
         # Darf nie still sterben (sonst 'running'-Ruine in der UI)
         print(f"[run] Job {job_id} abgestuerzt: {exc}\n{traceback.format_exc(limit=5)}")
@@ -1684,12 +1708,23 @@ def get_discovery(job_id: int):
     return payload
 
 
+class RunIn(BaseModel):
+    """Optionale Auswahl fuer den Backup-Lauf: nur diese Seiten sichern."""
+    urls: list[str] = Field(default_factory=list)
+
+
 @app.post("/api/jobs/{job_id}/run")
-def trigger_run(job_id: int):
+def trigger_run(job_id: int, payload: RunIn | None = None):
+    """Backup starten. Ohne Body: alle gefundenen Seiten.
+    Mit {"urls": [...]}: nur die ausgewaehlten Unterseiten sichern."""
     require_job(job_id)
-    t = threading.Thread(target=_scheduled_run, args=(job_id,), daemon=True)
+    only = None
+    if payload is not None and payload.urls:
+        only = {canon_url(u) for u in payload.urls}
+    t = threading.Thread(target=_scheduled_run, args=(job_id, only), daemon=True)
     t.start()
-    return {"started": True, "job_id": job_id}
+    return {"started": True, "job_id": job_id,
+            "selected": len(only) if only else None}
 
 
 @app.get("/api/runs")

@@ -28,7 +28,7 @@ export function esc(s) {
 
 export function planTxt(j) {
   if (j.schedule === 'manual') return 'manuell'
-  if (j.schedule === 'hourly') return `stündlich :${j.schedule_time?.slice(-2) ?? ''}`
+  if (j.schedule === 'hourly') return `stündlich (Minute :${j.schedule_time?.slice(-2) ?? '00'})`
   if (j.schedule === 'daily') return `täglich ${j.schedule_time}`
   if (j.schedule === 'weekly') {
     const days = { mon: 'Mo', tue: 'Di', wed: 'Mi', thu: 'Do', fri: 'Fr', sat: 'Sa', sun: 'So' }
